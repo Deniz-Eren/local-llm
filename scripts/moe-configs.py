@@ -124,25 +124,73 @@ def find_gguf_py(explicit: str | None) -> None:
     _bootstrap_gguf_py()
 
 
-def parse_metadata(model: Path) -> tuple[int, int, int, int, int, int, int]:
-    """Return (layers, experts, active, dense_b, expert_b, model_max_ctx,
-    kv_bytes_per_token_per_layer_fp16).
+@dataclass
+class KVShape:
+    """Per-architecture KV-cache geometry. Models with interleaved sliding-
+    window attention (Gemma 3/4, Cohere2, etc.) split layers into:
 
-    The last value is `n_head_kv * (key_length + value_length) * 2`, the actual
-    fp16 KV size for ONE token in ONE layer. Reading these straight from the
-    GGUF avoids guessing at GQA factors / head dims (the script previously
-    hardcoded 4 KV heads * 128 head_dim and silently halved the KV estimate
-    by counting K only)."""
+      * **full** layers whose KV grows linearly with `ctx`, and
+      * **SWA** layers whose KV is bounded by a fixed window and may use
+        different (typically smaller) per-head key/value dims.
+
+    KV bytes at context `ctx` (TCQ-compressed) is therefore:
+
+        swa_const_b  +  ctx * full_per_tok_b
+
+    where `swa_const_b` is independent of `ctx`. For models without SWA the
+    SWA fields are zero and the formula collapses to the old linear form.
+    """
+    n_full_layers: int
+    n_swa_layers: int
+    full_per_tok_per_layer_b: int   # fp16 bytes/token in one full layer
+    swa_per_tok_per_layer_b: int    # fp16 bytes/token in one SWA layer
+    sliding_window: int             # tokens of KV retained per SWA layer
+
+    @property
+    def swa_const_b(self) -> float:
+        return (self.n_swa_layers * self.sliding_window
+                * self.swa_per_tok_per_layer_b * KV_TBQ_FACTOR)
+
+    @property
+    def full_per_tok_b(self) -> float:
+        return (self.n_full_layers
+                * self.full_per_tok_per_layer_b * KV_TBQ_FACTOR)
+
+    def bytes_at(self, ctx: int) -> float:
+        return self.swa_const_b + ctx * self.full_per_tok_b
+
+
+def parse_metadata(model: Path) -> tuple[int, int, int, int, int, int, KVShape]:
+    """Return (layers, experts, active, dense_b, expert_b, model_max_ctx,
+    KVShape).
+
+    Reads per-layer KV geometry straight from the GGUF so models with
+    interleaved sliding-window attention (Gemma 3/4 etc.) are not
+    over-counted by treating every layer as a full-attention layer."""
     from gguf import GGUFReader  # type: ignore
 
     r = GGUFReader(str(model))
 
-    def field_uint(suffix: str) -> int:
-        # GGUFReader.fields keys look like "qwen35moe.block_count" — match by suffix.
+    def find_field(suffix: str):
         for name, field in r.fields.items():
             if name.endswith(suffix):
-                return int(field.parts[field.data[0]][0])
-        raise ValueError(f"Could not find *.{suffix} in {model.name}")
+                return field
+        return None
+
+    def field_uint(suffix: str, default: int | None = None) -> int:
+        f = find_field(suffix)
+        if f is None:
+            if default is not None:
+                return default
+            raise ValueError(f"Could not find *.{suffix} in {model.name}")
+        return int(f.parts[f.data[0]][0])
+
+    def field_uint_array(suffix: str) -> list[int] | None:
+        """Return the field as a list of ints if it's an array, else None."""
+        f = find_field(suffix)
+        if f is None or len(f.data) <= 1:
+            return None
+        return [int(f.parts[i][0]) for i in f.data]
 
     layers = field_uint("block_count")
     experts = field_uint("expert_count")
@@ -152,7 +200,42 @@ def parse_metadata(model: Path) -> tuple[int, int, int, int, int, int, int]:
     n_head_kv = field_uint("attention.head_count_kv")
     key_len = field_uint("attention.key_length")
     val_len = field_uint("attention.value_length")
-    kv_per_tok_per_layer = n_head_kv * (key_len + val_len) * KV_BYTES_PER_ELEM
+    full_per_tok_per_layer = n_head_kv * (key_len + val_len) * KV_BYTES_PER_ELEM
+
+    # SWA geometry. Models without SWA have no swa_layers array and no
+    # sliding_window key, in which case all layers are treated as full.
+    key_len_swa = field_uint("attention.key_length_swa", default=key_len)
+    val_len_swa = field_uint("attention.value_length_swa", default=val_len)
+    swa_per_tok_per_layer = n_head_kv * (key_len_swa + val_len_swa) * KV_BYTES_PER_ELEM
+    sliding_window = field_uint("attention.sliding_window", default=0)
+
+    # `attention.sliding_window_pattern` is one of:
+    #   - a length-n_layer BOOL array of per-layer is_swa flags (Gemma 4),
+    #   - a scalar period P meaning layer is SWA when (il + 1) % P != 0
+    #     (Gemma 3 convention; period 1 means "no SWA"),
+    #   - absent (no SWA).
+    swa_arr = field_uint_array("attention.sliding_window_pattern")
+    if swa_arr is not None and len(swa_arr) == layers:
+        n_swa_layers = sum(1 for v in swa_arr if v)
+    else:
+        period = field_uint("attention.sliding_window_pattern", default=0)
+        if period > 1 and sliding_window > 0:
+            n_swa_layers = sum(1 for il in range(layers)
+                               if (il + 1) % period != 0)
+        else:
+            n_swa_layers = 0
+    if sliding_window <= 0:
+        # No window size declared → can't bound SWA layers; treat as full.
+        n_swa_layers = 0
+    n_full_layers = layers - n_swa_layers
+
+    kv_shape = KVShape(
+        n_full_layers=n_full_layers,
+        n_swa_layers=n_swa_layers,
+        full_per_tok_per_layer_b=full_per_tok_per_layer,
+        swa_per_tok_per_layer_b=swa_per_tok_per_layer,
+        sliding_window=sliding_window,
+    )
 
     dense_b = 0
     expert_b = 0
@@ -162,23 +245,26 @@ def parse_metadata(model: Path) -> tuple[int, int, int, int, int, int, int]:
         else:
             dense_b += int(t.n_bytes)
 
-    return (layers, experts, active, dense_b, expert_b, model_max_ctx,
-            kv_per_tok_per_layer)
+    return (layers, experts, active, dense_b, expert_b, model_max_ctx, kv_shape)
 
 
-def kv_bytes(ctx: int, layers: int, kv_per_tok_per_layer: int) -> float:
-    return ctx * layers * kv_per_tok_per_layer * KV_TBQ_FACTOR
+def kv_bytes(ctx: int, kv_shape: KVShape) -> float:
+    return kv_shape.bytes_at(ctx)
 
 
-def max_fit_ctx(layers: int, dense_b: float, vram_mib: int, tax_mib: int,
-                kv_per_tok_per_layer: int) -> int:
-    """Largest context such that tax + dense + KV fits in VRAM. KV scales
-    linearly with ctx, so this is closed-form, not iterative."""
-    vram_for_kv_b = vram_mib * MIB - tax_mib * MIB - dense_b
+def max_fit_ctx(kv_shape: KVShape, dense_b: float,
+                vram_mib: int, tax_mib: int) -> int:
+    """Largest context such that tax + dense + KV fits in VRAM. KV is
+    `swa_const + ctx * full_per_tok` (linear in ctx), so closed-form."""
+    vram_for_kv_b = vram_mib * MIB - tax_mib * MIB - dense_b - kv_shape.swa_const_b
     if vram_for_kv_b <= 0:
         return 0
-    per_token_b = layers * kv_per_tok_per_layer * KV_TBQ_FACTOR
-    return int(vram_for_kv_b // per_token_b)
+    if kv_shape.full_per_tok_b <= 0:
+        # No full-attention layers: KV is bounded by the SWA window for every
+        # layer, so any ctx fits as far as KV is concerned. Return a sentinel
+        # large enough that `model_max_ctx` and `--ctx` always clamp first.
+        return 10 ** 9
+    return int(vram_for_kv_b // kv_shape.full_per_tok_b)
 
 
 def make_plan(model: Path, vram_mib: int, ram_mib: int,
@@ -200,16 +286,15 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
     every routed token. The verdict surfaces this via `gpu_experts == 0`.
     """
     (layers, experts, active, dense_b, expert_b, model_max_ctx,
-     kv_per_tok_per_layer) = parse_metadata(model)
+     kv_shape) = parse_metadata(model)
     if experts <= 0:
         raise ValueError("expert_count is 0 — this script targets MoE models only.")
 
     per_expert_b = expert_b / experts
 
     # Step 2a: largest ctx that fits with just the dense backbone reserved.
-    fit_ctx_raw = max_fit_ctx(layers, dense_b, vram_mib, tax_mib,
-                              kv_per_tok_per_layer)
-    fit_max_ctx = align_ctx_down(max(0, fit_ctx_raw))
+    fit_ctx_raw = max_fit_ctx(kv_shape, dense_b, vram_mib, tax_mib)
+    fit_max_ctx = align_ctx_down(min(model_max_ctx, max(0, fit_ctx_raw)))
 
     # Step 2b: cap the requested (or default) ctx by model_max and VRAM-fit.
     requested_ctx = ctx if ctx is not None else model_max_ctx
@@ -226,7 +311,7 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
 
     rec_ctx = align_ctx_down(min(model_max_ctx, max(1, fit_ctx_raw)))
 
-    kv_b = kv_bytes(chosen_ctx, layers, kv_per_tok_per_layer)
+    kv_b = kv_bytes(chosen_ctx, kv_shape)
 
     vram_total_b = vram_mib * MIB
     vram_tax_b = tax_mib * MIB

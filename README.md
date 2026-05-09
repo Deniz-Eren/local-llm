@@ -127,6 +127,9 @@ Generated with `python3 scripts/moe-configs.py --scan <models-dir>`. 30B variant
 | Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf      |  30 G |           256 |    0 / 256  |   185344 |  6144 MiB |  27804 MiB | borderline (RAM 156 MiB over) |
 | Qwen3.6-35B-A3B-Q8_0.gguf            |  35 G |           256 |    0 / 256  |   185856 |  6141 MiB |  32640 MiB | RAM over |
 | Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf      |  36 G |           256 |    0 / 256  |   183552 |  6140 MiB |  34080 MiB | RAM over |
+| gemma-4-26B-A4B-it-MXFP4_MOE.gguf    |  16 G |           128 |    0 / 128  |   188672 |  5492 MiB |  13310 MiB | **OK**   |
+| gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf   |  22 G |           128 |    0 / 128  |   188672 |  5492 MiB |  19742 MiB | **OK**   |
+| gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf   |  26 G |           128 |    0 / 128  |   184832 |  5491 MiB |  23822 MiB | **OK**   |
 
 All 35B variants land at `--n-cpu-moe 256` (= 0 GPU experts): dense + KV consume the VRAM budget, leaving none for experts. UD-Q5_K_XL is the best fit — highest-quality quant whose experts still fit in RAM (~4.8 GiB headroom) at `-c 185344`. UD-Q6_K_XL is 156 MiB over and runs with a small `-c` reduction. Q8_0 / UD-Q8_K_XL exceed RAM by 5–6 GiB; do not `--mlock` them.
 
@@ -245,6 +248,7 @@ The RTX 4090 + 1 TiB RAM row also fits at full ctx but holds only 3 GPU experts 
 - buun-llama-cpp (fork): https://github.com/spiritbuun/buun-llama-cpp
 - TCQ paper / dataset: https://huggingface.co/datasets/spiritbuun/turboquant-tcq-kv-cache
 - Qwen3.6 35B-A3B GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main
+- Gemma 4 26B-A4B-it GGUFs: https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/tree/main
 - Kimi-K2.6 UD-Q4_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF/tree/main/UD-Q4_K_XL
 
 # License
