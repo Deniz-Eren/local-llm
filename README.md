@@ -81,7 +81,7 @@ Empirically working command on this hardware (RTX A1000 6 GiB, 32 GiB RAM):
   -fa on \
   --fit off \
   -np 1 \
-  --threads 16 \
+  --threads 8 \
   --host 0.0.0.0 --port 8080 \
   --no-mmap
 ```
@@ -110,6 +110,23 @@ Without locking, the kernel can evict CPU-side experts under memory pressure, ca
 | RAM-over row in the table              | **do not** use `--mlock` — it will OOM the box; rely on mmap-paging instead. |
 
 Verify with `cat /proc/meminfo | grep Mlocked` after start: it should jump by the model's on-disk size. If not, `mlock()` is being silently denied — usually a `ulimit -l` set in a different shell. Raise via `ulimit -l <KiB>` (as root, in the same shell) or permanently via `memlock` in `/etc/security/limits.conf`.
+
+## CPU thread count (`--threads`)
+
+`--threads` sets the number of CPU worker threads used to run the expert MLPs that `--n-cpu-moe` keeps in RAM. On hybrid Intel CPUs (Alder Lake and later, including 12th–14th Gen Core and Core Ultra) **set this to the number of P-cores only**. E-cores have lower per-core throughput and a different cache hierarchy; mixing them into the same parallel MLP gemm causes the P-cores to wait on the slowest E-core finisher every step, dropping decode tok/s. Hyper-threading siblings on the P-cores add contention for the same vector units and also hurt; one thread per P-core is the right setting.
+
+This development host is a **13th Gen Intel Core i7-13850HX**: 8 P-cores + 12 E-cores, 28 logical threads total. Canonical setting: `--threads 8` (one per P-core).
+
+For any other CPU, look up the **P-core count specifically** (not total cores, not total threads) and use that:
+
+| CPU class                                  | `--threads` rule                                         |
+|--------------------------------------------|----------------------------------------------------------|
+| Intel hybrid (12th Gen+ Core, Core Ultra)  | number of P-cores (e.g. i7-13850HX → 8)                  |
+| Intel non-hybrid (11th Gen and earlier Xeon/Core) | number of physical cores (ignore HT siblings)     |
+| AMD Ryzen / EPYC (Zen 2+)                  | number of physical cores (ignore SMT siblings)           |
+| Apple Silicon                              | number of P-cores                                        |
+
+Pinning helps too: `taskset -c 0-7 ./llama-server ...` (or the P-core CPU-list from `lscpu --extended`) keeps the scheduler from migrating workers onto E-cores or HT siblings under load.
 
 # Models on disk — recommended settings
 
