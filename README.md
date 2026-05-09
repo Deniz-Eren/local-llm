@@ -128,6 +128,14 @@ For any other CPU, look up the **P-core count specifically** (not total cores, n
 
 Pinning helps too: `taskset -c 0-7 ./llama-server ...` (or the P-core CPU-list from `lscpu --extended`) keeps the scheduler from migrating workers onto E-cores or HT siblings under load.
 
+## Prefill vs. decode speed
+
+During a file read (the prompt), token throughput hits ~200 tok/s. During reasoning and output, it drops to ~20 tok/s. This is the prefill/decode gap inherent to autoregressive transformers, amplified by MoE routing on CPU.
+
+**Prefill** is batched: the entire prompt is tokenized and every token is processed in parallel via large GPU matrix multiplies. The GPU is fully utilized.
+
+**Decode** is sequential: each new token requires a full forward pass, and the output becomes the next input. This is memory-bandwidth bound — the model is read but only one token is produced. On this hardware the gap is wider because `--n-cpu-moe 256` puts all experts in RAM. After the GPU runs attention + dense layers, the router picks 8 active experts whose weights are pulled from RAM over PCIe and their MLP gemms run on a single CPU thread (per step). The GPU then waits for that CPU execution to finish before summing back into the residual stream. Decode latency is gated by single-threaded CPU MLP compute, not GPU throughput.
+
 # Models on disk — recommended settings
 
 Generated with `python3 scripts/moe-configs.py --scan <models-dir>`. 30B variants run at `context_length = 40960` (model max); 35B variants are capped well below their 262144 trained ctx by the 6 GiB VRAM budget. FIT respects both the 6 GiB VRAM budget and the ~27 GiB RAM budget.
