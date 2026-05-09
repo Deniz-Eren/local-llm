@@ -304,9 +304,10 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int, tax_mib: int) -> Non
         print("  -> CPU-side experts exceed the RAM budget. Use a smaller quant.")
     if p.gpu_experts < p.active:
         print(f"  -> Only {p.gpu_experts} experts on GPU; per-token routing needs "
-              f"{p.active} active. Each routed token will pull experts from CPU "
-              "(throughput-limited). Reduce --ctx or use a smaller quant if you "
-              "need more GPU experts.")
+              f"{p.active} active. On average {p.active - p.gpu_experts} of the "
+              "active expert MLPs per token will run on CPU instead of GPU "
+              "(slower per-token compute). Reduce --ctx or use a smaller quant "
+              "if you need more GPU experts.")
     print()
     print("=== llama-server flag ===")
     print(f"  {flag_line(p)}")

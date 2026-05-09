@@ -194,11 +194,58 @@ claude --settings ~/.claude/llamacpp.settings.json
 
 The model id under `models` must match `--alias` on llama-server. Pick the active model at runtime with `opencode` → `/models`, or pin it with the top-level `model` key as above.
 
+# Future platform — Kimi K2.6
+
+Scoping a heavier host for Kimi K2.6 (sparse MoE, much larger than the Qwen3.6 family). Target hardware under consideration:
+
+- **GPU:** NVIDIA RTX 5090, 32 GiB VRAM
+- **RAM:** 1 TiB
+
+Sizing approach: build the full GGUF locally, then run `scripts/moe-configs.py` against it with `--vram 32768 --ram 1048576` to get the recommended `--n-cpu-moe / -c` and the dense + KV + expert breakdown. The verdict tells us whether the platform clears the budget at the desired context, and how much headroom remains for further quants or longer ctx.
+
+We are testing with the **UD-Q4_K_XL** quant — 14 shards totalling ~544 GiB on disk, merging to a single `Kimi-K2.6-UD-Q4_K_XL.gguf` of ~544 GiB (583.7 GB).
+
+## Merging the split GGUF
+
+Unsloth ships Kimi-K2.6 as 14 split shards. Merge them into a single GGUF with `llama-gguf-split` from the same build used to run the server:
+
+```
+./llama.cpp/build/bin/llama-gguf-split --merge \
+  ~/Downloads/models/Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf \
+  ~/Downloads/models/Kimi-K2.6-UD-Q4_K_XL.gguf
+```
+
+Pass only the **first** shard (`00001-of-00014`) plus the desired output path; `llama-gguf-split` discovers the remaining shards from the filename pattern and refuses if any of `00002`..`00014` are missing. All 14 files must be present in the same directory before merging.
+
+After the merge succeeds, the shards can be deleted; only the merged file is needed at runtime.
+
+## Sizing run
+
+Run `scripts/moe-configs.py` against the merged GGUF on each candidate host:
+
+```
+python3 scripts/moe-configs.py \
+  ~/Downloads/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
+  --vram <vram-mib> --ram <ram-mib> --ctx 262144
+```
+
+Model fixed facts (from the GGUF metadata): 61 layers, 384 experts, 8 active per token, dense backbone 12343 MiB, one expert ~1418 MiB, all experts ~544320 MiB, KV cache ~6736 MiB at `turbo3_tcq` and `-c 262144`.
+
+| GPU       | VRAM   | RAM   | `--n-cpu-moe` | GPU exp     | `-c`     | VRAM used | RAM used     | FIT     |
+|-----------|-------:|------:|--------------:|------------:|---------:|----------:|-------------:|---------|
+| RTX 5090  | 32 GiB | 1 TiB |           375 |   9 / 384   |   262144 | 31837 MiB |  531562 MiB  | **OK**  |
+| RTX 4090  | 24 GiB | 1 TiB |           381 |   3 / 384   |   262144 | 23332 MiB |  540067 MiB  | **OK**  |
+
+The RTX 5090 + 1 TiB RAM row clears the budget at full 262144 ctx with ~280 MiB VRAM headroom and ~500 GiB RAM headroom — i.e. the GPU is the binding constraint, not RAM. The RAM headroom is large enough to absorb a heavier KV pair (`turbo4`/`turbo4`) or a higher quant if desired.
+
+The RTX 4090 + 1 TiB RAM row also fits at full ctx but holds only 3 GPU experts vs the 8 active per token, so on average ~5 of the 8 active expert MLPs per token run on CPU instead of GPU. Throughput is then dominated by CPU MLP compute. The 5090 row clears 8 GPU experts (with one to spare), so the active set runs entirely on the GPU and per-token throughput is GPU-bound.
+
 # References
 
 - buun-llama-cpp (fork): https://github.com/spiritbuun/buun-llama-cpp
 - TCQ paper / dataset: https://huggingface.co/datasets/spiritbuun/turboquant-tcq-kv-cache
 - Qwen3.6 35B-A3B GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main
+- Kimi-K2.6 UD-Q4_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF/tree/main/UD-Q4_K_XL
 
 # License
 
