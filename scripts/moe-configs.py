@@ -425,8 +425,26 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
             rows.append((g, None, str(e)))
 
     fitting = [(g, p) for g, p, err in rows if p is not None and p.fits]
-    fitting.sort(key=lambda gp: (gp[1].dense_b + gp[1].expert_b, -gp[1].cpu_experts), reverse=True)
+    if ctx is not None:
+        # Prefer models that can reach the full requested context.
+        # Among those, prefer larger models with more GPU experts.
+        fitting.sort(key=lambda gp: (
+            0 if gp[1].ctx >= ctx else 1,              # can reach ctx first
+            -(gp[1].dense_b + gp[1].expert_b),          # larger models first
+            gp[1].cpu_experts,                          # fewer CPU experts
+        ))
+    else:
+        # Auto mode: largest models with most GPU experts.
+        fitting.sort(key=lambda gp: (
+            -(gp[1].dense_b + gp[1].expert_b),
+            gp[1].cpu_experts,
+        ))
     best = fitting[0] if fitting else None
+
+    if ctx is not None and best and best[1].ctx < ctx:
+        print(f"NOTE: no model fits the VRAM budget at ctx={ctx}; "
+              f"best reaches {best[1].ctx}. Reduce --ctx or use a smaller quant.",
+              file=sys.stderr)
 
     if quiet:
         if not best:

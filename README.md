@@ -144,19 +144,19 @@ Generated with `python3 scripts/moe-configs.py --scan <models-dir>`. 30B variant
 |--------------------------------------|------:|--------------:|------------:|---------:|----------:|-----------:|----------|
 | Qwen3-30B-A3B-Q2_K.gguf              |  11 G |            77 |   51 / 128  |    40960 |  6140 MiB |   6020 MiB | **OK**   |
 | Qwen3-30B-A3B-Q3_K_S.gguf            |  13 G |            86 |   42 / 128  |    40960 |  6119 MiB |   7982 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-IQ3_S.gguf        |  13 G |           256 |    0 / 256  |   220416 |  6140 MiB |  11038 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q4_K_S.gguf       |  20 G |           256 |    0 / 256  |   192768 |  6144 MiB |  17478 MiB | **OK**   |
-| Qwen3.6-35B-A3B-MXFP4_MOE.gguf       |  21 G |           256 |    0 / 256  |   185344 |  6144 MiB |  18136 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf      |  21 G |           256 |    0 / 256  |   185344 |  6144 MiB |  18760 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf      |  25 G |           256 |    0 / 256  |   185344 |  6144 MiB |  22796 MiB | **OK** (best fit) |
-| Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf      |  30 G |           256 |    0 / 256  |   185344 |  6144 MiB |  27804 MiB | borderline (RAM 156 MiB over) |
-| Qwen3.6-35B-A3B-Q8_0.gguf            |  35 G |           256 |    0 / 256  |   185856 |  6141 MiB |  32640 MiB | RAM over |
-| Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf      |  36 G |           256 |    0 / 256  |   183552 |  6140 MiB |  34080 MiB | RAM over |
-| gemma-4-26B-A4B-it-MXFP4_MOE.gguf    |  16 G |           128 |    0 / 128  |   188672 |  5492 MiB |  13310 MiB | **OK**   |
-| gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf   |  22 G |           128 |    0 / 128  |   188672 |  5492 MiB |  19742 MiB | **OK**   |
-| gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf   |  26 G |           128 |    0 / 128  |   184832 |  5491 MiB |  23822 MiB | **OK**   |
+| Qwen3.6-35B-A3B-MXFP4_MOE.gguf       |  18 G |           256 |    0 / 256  |   185344 |  6144 MiB |  18136 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q4_K_S.gguf       |  19 G |           256 |    0 / 256  |   192768 |  6144 MiB |  17478 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf      |  18 G |           256 |    0 / 256  |   185344 |  6144 MiB |  18760 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf      |  18 G |           256 |    0 / 256  |   185344 |  6144 MiB |  22796 MiB | **OK** (best fit) |
+| Qwen3.6-35B-A3B-UD-IQ3_S.gguf        |  22 G |           256 |    0 / 256  |   220416 |  6140 MiB |  11038 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf      |  18 G |           256 |    0 / 256  |   185344 |  6144 MiB |  27804 MiB | **ram**   |
+| Qwen3.6-35B-A3B-Q8_0.gguf            |  18 G |           256 |    0 / 256  |   185856 |  6141 MiB |  32640 MiB | **ram**   |
+| Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf      |  18 G |           256 |    0 / 256  |   183552 |  6140 MiB |  34080 MiB | **ram**   |
+| gemma-4-26B-A4B-it-MXFP4_MOE.gguf    |  18 G |           128 |    0 / 128  |   188672 |  6142 MiB |  13310 MiB | **OK**   |
+| gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf   |  19 G |           128 |    0 / 128  |   188672 |  6142 MiB |  19742 MiB | **OK**   |
+| gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf   |  18 G |           128 |    0 / 128  |   184832 |  6141 MiB |  23822 MiB | **OK**   |
 
-All 35B variants land at `--n-cpu-moe 256` (= 0 GPU experts): dense + KV consume the VRAM budget, leaving none for experts. UD-Q5_K_XL is the best fit — highest-quality quant whose experts still fit in RAM (~4.8 GiB headroom) at `-c 185344`. UD-Q6_K_XL is 156 MiB over and runs with a small `-c` reduction. Q8_0 / UD-Q8_K_XL exceed RAM by 5–6 GiB; do not `--mlock` them.
+All 35B variants land at `--n-cpu-moe 256` (= 0 GPU experts): dense + KV consume the VRAM budget, leaving none for experts. UD-Q5_K_XL is the best fit — highest-quality quant whose experts still fit in RAM (~4.8 GiB headroom) at `-c 185344`. UD-Q6_K_XL / Q8_0 / UD-Q8_K_XL exceed the RAM budget; do not `--mlock` them.
 
 # Profiling
 
