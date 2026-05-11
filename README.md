@@ -222,6 +222,29 @@ claude --settings ~/.claude/llamacpp.settings.json
 
 The model id under `models` must match `--alias` on llama-server. Pick the active model at runtime with `opencode` → `/models`, or pin it with the top-level `model` key as above.
 
+# Pi redirect
+
+`~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "llama.cpp (local)": {
+      "baseUrl": "http://localhost:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "none",
+      "models": [
+        {
+          "id": "Qwen3.6-35b"
+        }
+      ]
+    }
+  }
+}
+```
+
+Point Pi at the same `llama-server` instance running locally. The provider name (`"llama.cpp (local)"`) is an arbitrary label; the `baseUrl` must match the llama-server address, and the model `id` should correspond to the model loaded.
+
 # Future platform — Kimi K2.6
 
 Scoping a heavier host for Kimi K2.6 (sparse MoE, much larger than the Qwen3.6 family). Target hardware under consideration:
