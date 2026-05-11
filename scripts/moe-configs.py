@@ -23,22 +23,18 @@ from pathlib import Path
 # element count from gguf_dump's text output and mistaking it for bytes —
 # which made every quant of a model look identical in size.
 def _bootstrap_gguf_py() -> None:
+    # Check CWD-relative locations that may hold gguf-py.
     candidates = [
+        Path.cwd() / "llama.cpp" / "gguf-py",
         Path.cwd() / "gguf-py",
-        Path.home() / "Repos" / "outlook" / "buun-llama-cpp" / "gguf-py",
-        Path.home() / "Repos" / "outlook" / "llama.cpp" / "gguf-py",
-        Path.home() / "Repos" / "llama.cpp" / "gguf-py",
-        Path.home() / "Repos" / "outlook" / "llama.cpp-elusznik" / "gguf-py",
-        Path.home() / "llama.cpp" / "gguf-py",
     ]
     for c in candidates:
         if (c / "gguf" / "__init__.py").is_file():
             sys.path.insert(0, str(c))
             return
     raise SystemExit(
-        "Could not locate the gguf-py package (vendored in the llama.cpp "
-        "source tree). Pass --gguf-py-path /path/to/gguf-py to point at it "
-        "explicitly."
+        "Could not locate gguf-py under ./llama.cpp/gguf-py or ./gguf-py. "
+        "Pass --gguf-py-path /path/to/gguf-py to point at it explicitly."
     )
 
 MIB = 1024 ** 2
