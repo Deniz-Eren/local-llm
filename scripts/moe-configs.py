@@ -42,11 +42,10 @@ GIB = 1024 ** 3
 
 # TurboQuant / TCQ KV compression factor (relative to fp16). The canonical KV
 # config is `-ctk turbo3_tcq -ctv turbo3_tcq` from the spiritbuun/buun-llama-cpp
-# fork: 3.25 bpv symmetric = 0.203x of fp16. If you switch to a different KV
-# pair (e.g. turbo4/turbo4 = 0.266, turbo3_tcq/turbo2_tcq = 0.172,
-# turbo2_tcq/turbo2_tcq = 0.141, or fall back to q8_0/q8_0 = 0.531), update
-# this constant to match — sizing here drives the suggested `--n-cpu-moe`.
-KV_TBQ_FACTOR = 0.203
+# fork: 3.25 bpv symmetric = 0.203x of fp16. Switch KV pairs via the `--kv-factor`
+# CLI flag (e.g. 0.266 for turbo4/turbo4, 0.172 for turbo3_tcq/turbo2_tcq,
+# 0.141 for turbo2_tcq/turbo2_tcq, 0.531 for q8_0/q8_0).
+DEFAULT_KV_FACTOR = 0.203
 KV_BYTES_PER_ELEM = 2  # fp16 baseline before the TCQ factor
 
 # llama.cpp rounds n_ctx UP to a multiple of CTX_PAD when it allocates the KV
@@ -84,6 +83,7 @@ class Plan:
     model_max_ctx: int
     fit_max_ctx: int
     rec_ctx: int
+    kv_factor: float
 
     @property
     def vram_ok(self) -> bool:
@@ -142,15 +142,27 @@ class KVShape:
     swa_per_tok_per_layer_b: int    # fp16 bytes/token in one SWA layer
     sliding_window: int             # tokens of KV retained per SWA layer
 
+    def __post_init__(self) -> None:
+        # Factor is set later by make_plan; defaults to 0 before that.
+        self._kv_factor: float = 0.0
+
+    @property
+    def kv_factor(self) -> float:
+        return self._kv_factor if self._kv_factor > 0 else DEFAULT_KV_FACTOR
+
+    @kv_factor.setter
+    def kv_factor(self, value: float) -> None:
+        self._kv_factor = value
+
     @property
     def swa_const_b(self) -> float:
         return (self.n_swa_layers * self.sliding_window
-                * self.swa_per_tok_per_layer_b * KV_TBQ_FACTOR)
+                * self.swa_per_tok_per_layer_b * self.kv_factor)
 
     @property
     def full_per_tok_b(self) -> float:
         return (self.n_full_layers
-                * self.full_per_tok_per_layer_b * KV_TBQ_FACTOR)
+                * self.full_per_tok_per_layer_b * self.kv_factor)
 
     def bytes_at(self, ctx: int) -> float:
         return self.swa_const_b + ctx * self.full_per_tok_b
@@ -264,7 +276,8 @@ def max_fit_ctx(kv_shape: KVShape, dense_b: float,
 
 
 def make_plan(model: Path, vram_mib: int, ram_mib: int,
-              tax_mib: int, ctx: int | None) -> "Plan":
+              tax_mib: int, ctx: int | None,
+              kv_factor: float = DEFAULT_KV_FACTOR) -> "Plan":
     """Build a sizing Plan with this VRAM allocation precedence:
 
       1. **Dense backbone:** all non-expert tensors are placed on the GPU.
@@ -286,6 +299,7 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
     if experts <= 0:
         raise ValueError("expert_count is 0 — this script targets MoE models only.")
 
+    kv_shape.kv_factor = kv_factor
     per_expert_b = expert_b / experts
 
     # Step 2a: largest ctx that fits with just the dense backbone reserved.
@@ -333,6 +347,7 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
         ram_budget_b=ram_budget_b, cpu_expert_b=cpu_expert_b,
         gpu_expert_b=gpu_expert_b, ctx=chosen_ctx,
         model_max_ctx=model_max_ctx, fit_max_ctx=fit_max_ctx, rec_ctx=rec_ctx,
+        kv_factor=kv_factor,
     )
 
 
@@ -359,7 +374,7 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int, tax_mib: int) -> Non
     print(f"  Dense backbone:        {fmt_mib(p.dense_b)}")
     print(f"  All experts:           {fmt_mib(p.expert_b)}")
     print(f"  One expert:            {fmt_mib(p.per_expert_b)}")
-    print(f"  KV cache (TCQ x{KV_TBQ_FACTOR}):  {fmt_mib(p.kv_b)}")
+    print(f"  KV cache (TCQ x{p.kv_factor:.3f}):  {fmt_mib(p.kv_b)}")
     print()
     print(f"=== VRAM plan (budget {vram_mib - tax_mib} MiB) ===")
     print(f"  Dense backbone:        {fmt_mib(p.dense_b)}")
@@ -395,7 +410,8 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int, tax_mib: int) -> Non
 
 
 def scan_dir(scan_path: Path, vram: int, ram: int,
-             tax: int, ctx: int | None, quiet: bool) -> int:
+             tax: int, ctx: int | None, quiet: bool,
+             kv_factor: float = DEFAULT_KV_FACTOR) -> int:
     ggufs = sorted(scan_path.glob("*.gguf"))
     if not ggufs:
         raise SystemExit(f"No .gguf files found in {scan_path}")
@@ -403,7 +419,7 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
     rows = []
     for g in ggufs:
         try:
-            p = make_plan(g, vram, ram, tax, ctx)
+            p = make_plan(g, vram, ram, tax, ctx, kv_factor)
             rows.append((g, p, None))
         except Exception as e:  # noqa: BLE001
             rows.append((g, None, str(e)))
@@ -471,6 +487,10 @@ def main() -> int:
                          "= min(model trained max, largest VRAM-fitting context).")
     ap.add_argument("--quiet", "-q", action="store_true",
                     help="Print only the recommended llama-server flags")
+    ap.add_argument("--kv-factor", type=float, default=DEFAULT_KV_FACTOR,
+                    help=f"KV cache compression factor (default: {DEFAULT_KV_FACTOR} for "
+                         "turbo3_tcq/turbo3_tcq; use 0.266 for turbo4/turbo4, "
+                         "0.172 for turbo3_tcq/turbo2_tcq, etc.)")
     ap.add_argument("--gguf-py-path", default=None,
                     help="Path to the gguf-py directory inside an llama.cpp checkout (auto-detected if omitted)")
     args = ap.parse_args()
@@ -487,14 +507,14 @@ def main() -> int:
         if not scan_path.is_dir():
             raise SystemExit(f"--scan path is not a directory: {scan_path}")
         return scan_dir(scan_path, args.vram, max(0, args.ram - args.os_reserve),
-                        args.tax, args.ctx, args.quiet)
+                        args.tax, args.ctx, args.quiet, args.kv_factor)
 
     model = Path(args.gguf).expanduser()
     if not model.is_file():
         raise SystemExit(f"Model not found: {model}")
 
     plan = make_plan(model, args.vram, max(0, args.ram - args.os_reserve),
-                     args.tax, args.ctx)
+                     args.tax, args.ctx, args.kv_factor)
     if args.quiet:
         print(flag_line(plan))
         return 0 if plan.fits else 1
