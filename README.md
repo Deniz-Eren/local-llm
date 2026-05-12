@@ -104,12 +104,29 @@ Then enable the matching cmake options:
 
 # Sizing
 
+## Single model
+
 ```bash
 python3 scripts/moe-configs.py <model-path>
+```
+
+Reports the VRAM/RAM breakdown and prints the `--n-gpu-layers / --n-cpu-moe / -c` flags to use. Host budget is configurable via `--vram` and `--ram` (both in MiB). Default `--vram` is 6144 (6 GiB); default `--ram` is 32768 (32 GiB, i.e. the budget available to llama.cpp after subtracting OS overhead). KV cache types default to `turbo4` (keys) and `turbo3_tcq` (values). Default context is `--ctx 128000`; pass `--ctx 0` to use the model's trained max, or any other value to stretch as far as VRAM allows.
+
+## Directory scan
+
+```bash
 python3 scripts/moe-configs.py --scan <models-dir>     # pick the best-fitting GGUF
 ```
 
-Reports the VRAM/RAM breakdown and prints the flags to use. Host budget is configurable via `--vram` and `--ram` (both in MiB). Default `--vram` is 6144 (6 GiB); default `--ram` is 32768 (32 GiB, i.e. the budget available to llama.cpp after subtracting OS overhead). KV cache types default to `turbo4` (keys) and `turbo3_tcq` (values). Default context is `--ctx 128000`; pass `--ctx 0` to use the model's trained max, or any other value to stretch as far as VRAM allows.
+Evaluates every `.gguf` in `<dir>` and prints a markdown table with the best-fit flags.
+
+## Multi-config scan
+
+```bash
+./scripts/scan-all.sh <models-dir> --vram 6144 --ram 32768 --ctx 128000
+```
+
+Scans all models across multiple KV cache configurations (turbo4/turbo3_tcq, turbo3_tcq/turbo3_tcq, turbo4/turbo4, turbo3_tcq/turbo2_tcq) and outputs a combined markdown or CSV table (`--format csv`). See `./scripts/scan-all.sh --help` for all options.
 
 VRAM is allocated in strict order:
 
@@ -121,7 +138,29 @@ There is no expert floor: if dense + KV consume the budget, every expert goes to
 
 # Run
 
-Empirically working command on this hardware (RTX A1000 6 GiB, 32 GiB RAM):
+## Quick start with `run-server.sh`
+
+The repo includes `scripts/run-server.sh` to launch the server with MoE expert routing and TurboQuant KV without manually composing flags. It auto-detects `--n-cpu-moe`, `-c`, and KV types from `moe-configs.py`:
+
+```bash
+# Auto-size from GGUF
+./scripts/run-server.sh --model ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf
+
+# Explicit expert count, 128K context, custom port
+./scripts/run-server.sh -m ~/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
+    --n-cpu-moe 382 --ctx 128000 --port 8081 --alias kimi-k2.6
+
+# Tighter KV, fewer threads for a hybrid CPU
+./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
+    --n-cpu-moe 237 -ctk turbo3_tcq -ctv turbo3_tcq \
+    --threads 8 --alias qwen3.6
+```
+
+See `./scripts/run-server.sh --help` for all options.
+
+## Empirically working command
+
+On this hardware (RTX A1000 6 GiB, 32 GiB RAM):
 
 ```bash
 ./llama.cpp/build/bin/llama-server \
@@ -220,21 +259,21 @@ Generated with `python3 scripts/moe-configs.py --scan <models-dir> --cache-type-
 
 The default `--ctx 128000` is a practical sweet spot for long-term focus on this hardware. At this context the KV cache (with `turbo4`/`turbo3_tcq`) costs ~4.6 GiB — leaving just enough headroom for a reasonable number of experts on GPU. This lets the model attend to multi-page documents, long codebases, and extended conversations without hitting the VRAM wall.
 
-| Model file                           | Size  | `--n-cpu-moe` | GPU exp     | `-c`     | VRAM used | RAM used   | FIT      |
-|--------------------------------------|------:|--------------:|------------:|---------:|----------:|-----------:|----------|
-| Qwen3-30B-A3B-Q2_K.gguf              |  11 G |            71 |   57 / 128  |    40960 |  6080 MiB |   5551 MiB | **OK**   |
-| Qwen3-30B-A3B-Q3_K_S.gguf            |  13 G |            81 |   47 / 128  |    40960 |  6053 MiB |   7518 MiB | **OK**   |
-| Qwen3.6-35B-A3B-MXFP4_MOE.gguf       |  18 G |           239 |   17 / 239  |   128000 |  6101 MiB |  16932 MiB | **OK**   |
-| Qwen3.6-35B-A3B-Q8_0.gguf            |  18 G |           247 |    9 / 247  |   128000 |  6033 MiB |  31492 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-IQ3_S.gguf        |  22 G |           215 |   41 / 215  |   128000 |  6105 MiB |   9270 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q4_K_S.gguf       |  19 G |           237 |   19 / 237  |   128000 |  6076 MiB |  16181 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf      |  18 G |           239 |   17 / 239  |   128000 |  6142 MiB |  17514 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf      |  18 G |           242 |   14 / 242  |   128000 |  6143 MiB |  21549 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf      |  18 G |           245 |   11 / 245  |   128000 |  6091 MiB |  26609 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf      |  18 G |           247 |    9 / 247  |   128000 |  6120 MiB |  32882 MiB | **ram**   |
-| gemma-4-26B-A4B-it-MXFP4_MOE.gguf    |  18 G |           116 |   12 / 116  |   128000 |  6096 MiB |  12062 MiB | **OK**   |
-| gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf   |  19 G |           120 |    8 / 120  |   128000 |  6082 MiB |  18508 MiB | **OK**   |
-| gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf   |  18 G |           122 |    6 / 122  |   128000 |  6025 MiB |  22705 MiB | **OK**   |
+| Model file                           | Size  | `--n-cpu-moe` | GPU exp     | `-c`     | VRAM used | RAM used   | tokens/sec | FIT      |
+|--------------------------------------|------:|--------------:|------------:|---------:|----------:|-----------:|:----------:|----------|
+| Qwen3-30B-A3B-Q2_K.gguf              |  11 G |            71 |   57 / 128  |    40960 |  6080 MiB |   5551 MiB |            | **OK**   |
+| Qwen3-30B-A3B-Q3_K_S.gguf            |  13 G |            81 |   47 / 128  |    40960 |  6053 MiB |   7518 MiB |            | **OK**   |
+| Qwen3.6-35B-A3B-MXFP4_MOE.gguf       |  18 G |           239 |   17 / 239  |   128000 |  6101 MiB |  16932 MiB |            | **OK**   |
+| Qwen3.6-35B-A3B-Q8_0.gguf            |  18 G |           247 |    9 / 247  |   128000 |  6033 MiB |  31492 MiB |            | **OK**   |
+| Qwen3.6-35B-A3B-UD-IQ3_S.gguf        |  22 G |           215 |   41 / 215  |   128000 |  6105 MiB |   9270 MiB |            | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q4_K_S.gguf       |  19 G |           237 |   19 / 237  |   128000 |  6076 MiB |  16181 MiB |            | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf      |  18 G |           239 |   17 / 239  |   128000 |  6142 MiB |  17514 MiB |            | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf      |  18 G |           242 |   14 / 242  |   128000 |  6143 MiB |  21549 MiB |            | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf      |  18 G |           245 |   11 / 245  |   128000 |  6091 MiB |  26609 MiB |            | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf      |  18 G |           247 |    9 / 247  |   128000 |  6120 MiB |  32882 MiB |            | **ram**   |
+| gemma-4-26B-A4B-it-MXFP4_MOE.gguf    |  18 G |           116 |   12 / 116  |   128000 |  6096 MiB |  12062 MiB |            | **OK**   |
+| gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf   |  19 G |           120 |    8 / 120  |   128000 |  6082 MiB |  18508 MiB |            | **OK**   |
+| gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf   |  18 G |           122 |    6 / 122  |   128000 |  6025 MiB |  22705 MiB |            | **OK**   |
 
 All 35B and gemma-4 variants land at `-c 128000` (default context): dense + KV consume ~6 GiB VRAM, leaving 0–40 GPU experts depending on quant quality. UD-Q4_K_S is the recommended default — good quant quality, 19 GPU experts keep the active set mostly on-GPU, and ~16 GiB RAM headroom for safety. Q8_K_XL exceeds the RAM budget; do not `--mlock` it. Q8_0 is the best overall fit if you need maximum quality and can tolerate more CPU expert routing (only 9 GPU experts).
 
@@ -327,152 +366,15 @@ Point Pi at the same `llama-server` instance running locally. The provider name 
 
 # Future platform — Kimi K2.6
 
-Kimi K2.6 is a sparse MoE model much larger than the Qwen3.6 family. We have an experimentation host and are profiling its fit.
+Kimi K2.6 is a sparse MoE model much larger than the Qwen3.6 family. We are profiling its fit across different host platforms.
 
-## Experiment host hardware
+See **[docs/kimi-k2.6.md](docs/kimi-k2.6.md)** for full details: experiment host hardware, model metadata, merge instructions, AVX-512 build, sizing scans, and hypothetical RTX 5090 / RTX 4090 platform analysis.
 
-| Component | Model | Details |
-|-----------|-------|--------|
-| **CPU** | Intel Xeon Gold 5120 | 14 cores / 28 threads, Skylake-SP, AVX-512, 2.20 GHz ([spec sheet](https://www.intel.com/content/www/us/en/products/sku/120474/intel-xeon-gold-5120-processor-19-25m-cache-2-20-ghz/specifications.html)) |
-| **RAM** | 530 GB | DDR4 ECC |
-| **GPU** | NVIDIA TU104-895-A1 (T4) | 16 GB GDDR6, 4096 CUDA cores, Tensor Cores ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf)) |
-
-## Model
-
-We are testing with the **UD-Q4_K_XL** quant from Unsloth — 14 shards totalling ~544 GiB on disk, merged to a single `Kimi-K2.6-UD-Q4_K_XL.gguf` (~544 GiB).
-
-### Merging the split GGUF
-
-Unsloth ships Kimi-K2.6 as 14 split shards. Merge them into a single GGUF with `llama-gguf-split` from the same build used to run the server:
-
-```bash
-./llama.cpp/build/bin/llama-gguf-split --merge \
-  ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf \
-  ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf
-```
-
-Pass only the **first** shard (`00001-of-00014`) plus the desired output path; `llama-gguf-split` discovers the remaining shards from the filename pattern and refuses if any of `00002`..`00014` are missing. All 14 files must be present in the same directory before merging.
-
-After the merge succeeds, the shards can be deleted; only the merged file is needed at runtime.
-
-### Model metadata
-
-| Property | Value |
-|----------|-------|
-| Layers | 61 |
-| Experts (total) | 384 |
-| Active per token | 8 |
-| Dense backbone | 12343 MiB |
-| One expert | ~1418 MiB |
-| All experts | ~544320 MiB (~531 GiB) |
-| Trained context | 262144 |
-
-## Build with AVX-512
-
-The Xeon Gold 5120 (Skylake-SP) supports AVX-512F — build with `GGML_AVX512=ON`. `-DGGML_NATIVE=ON` handles `-march=native` automatically.
-
-```bash
-cd llama.cpp
-cmake -B build \
-  -DGGML_CUDA=ON \
-  -DGGML_NATIVE=ON \
-  -DGGML_CUDA_FA=ON \
-  -DGGML_CUDA_FA_ALL_QUANTS=ON \
-  -DCMAKE_CUDA_ARCHITECTURES=75 \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DGGML_AVX512=ON \
-  -DCMAKE_C_FLAGS="-O3" \
-  -DCMAKE_CXX_FLAGS="-O3"
-cmake --build build -j$(nproc)
-```
-
-Key flags:
-- **`-DGGML_AVX512=ON`** — enables the AVX-512 code paths in ggml source (Skylake-SP supports AVX-512F, CD, ER, PF, VL only — not VBMI, VNNI, or BF16).
-- **`-DGGML_NATIVE=ON`** — auto-detects the CPU and passes `-march=native` so the compiler emits the right instruction set (including AVX-512F on the Xeon Gold 5120).
-- **`-DCMAKE_C/CXX_FLAGS="-O3"`** — maximum optimization level for CPU-side compute.
-- **`-DCMAKE_CUDA_ARCHITECTURES=75`** — targets the T4's Turing architecture (sm_75).
-- **`-DCMAKE_BUILD_TYPE=Release`** — optimize build type.
-
-AVX-512 accelerates the CPU-side expert MLPs that `--n-cpu-moe` keeps in RAM. Without it, the Xeon Gold 5120 falls back to AVX2 (256-bit), halving the per-cycle throughput of the expert GEMM kernels.
-
-## Sizing
-
-The host has 16 GiB VRAM and 530 GiB RAM. With `turbo3_tcq` KV at `-c 20000`, the script fits the model:
-
-```bash
-python3 scripts/moe-configs.py \
-  ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf \
-  --vram 16384 --ram 542720 \
-  --cache-type-k turbo3_tcq --cache-type-v turbo3_tcq \
-  --ctx 20000
-```
-
-Result:
-
-```
-Context:          19968  (model max: 262144, VRAM-fit max: 157184)
-  KV cache:             513.12 MiB
-  Experts on GPU (  2):    2835.00 MiB
-  VRAM used:          15691.53 MiB
-  RAM used:          541485.00 MiB
-  Flags: --n-cpu-moe 382 -c 19968 -ctk turbo3_tcq -ctv turbo3_tcq
-```
-
-**Note:** We use `-c 20000` (rounded to 19968 by CTX_PAD alignment) as a practical profiling limit — it keeps the KV cache small (~513 MiB) for faster iteration during experimentation. The hardware can easily support much larger contexts: the VRAM-fit max is 157184 tokens at `turbo3_tcq`, and 128000 is the preferred default for long-term work. Lower `-c` simply keeps VRAM profiling manageable while the model is still being profiled.
-
-### Config strategy comparison
-
-| Configuration | KV cache | GPU experts | VRAM used | RAM used | Notes |
-|---------------|----------|-------------|-----------|----------|-------|
-| **`@ 20K — profiling`** | | | | | |
-| `turbo3_tcq` / `turbo3_tcq` | 513 MiB | 2 / 382 | 15692 MiB | 541485 MiB | Default for profiling |
-| `turbo4` / `turbo4` | 671 MiB | 2 / 382 | 15850 MiB | 541485 MiB | Lossless keys |
-| `turbo4` / `turbo3_tcq` | 597 MiB | 2 / 382 | 15775 MiB | 541485 MiB | Asymmetric: lossless K, tight V |
-| `turbo3_tcq` / `turbo2_tcq` | 439 MiB | 2 / 382 | 15617 MiB | 541485 MiB | Tightest |
-| **`@ 128K — long-term`** | | | | | |
-| `turbo3_tcq` / `turbo3_tcq` | 3289 MiB | 0 / 384 | 15633 MiB | 544320 MiB | 0 GPU; 8 active experts on CPU |
-| `turbo4` / `turbo4` | 4035 MiB | 0 / 384 | 16379 MiB | 544320 MiB | Lossless; 0 GPU; VRAM nearly full |
-| `turbo4` / `turbo3_tcq` | 3825 MiB | 0 / 384 | 16169 MiB | 544320 MiB | Asymmetric; 0 GPU |
-| `turbo3_tcq` / `turbo2_tcq` | 2813 MiB | 0 / 384 | 15156 MiB | 544320 MiB | Tightest; still 0 GPU at 128K | |
-
-At this VRAM budget the bottleneck is always RAM-side expert routing: only 2 of 384 experts fit on GPU, meaning 6 of the 8 active experts per token run on CPU. The 530 GiB RAM budget accommodates all 382 CPU-side experts (~531 GiB) with only ~1.2 GiB headroom — tight but sufficient.
-
-## Canonical run command
-
-```bash
-./llama.cpp/build/bin/llama-server \
-  -m ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf \
-  --alias kimi-k2.6 \
-  --n-gpu-layers 999 \
-  --n-cpu-moe 382 \
-  -ctk turbo3_tcq \
-  -ctv turbo3_tcq \
-  -c 20000 \
-  -fa on \
-  --fit off \
-  -np 1 \
-  --host 0.0.0.0 --port 8080 \
-  --no-mmap
-```
-
-- `--n-cpu-moe 382` — only 2 experts fit on the 16 GiB GPU; the rest run on CPU.
-- `-c 20000` — profiling context; increase toward 128000 for long-term use when ready.
-- `--threads 28` — set to the full thread count for the Xeon Gold 5120 (14 physical cores × 2 threads each) since it's a non-hybrid processor.
-
-### Hypothetical future platforms
-
-The sizing script can also evaluate what a heavier host would enable. Running the same GGUF with `--vram 32768 --ram 1048576` (32 GiB VRAM / 1 TiB RAM, `turbo3_tcq`, `--ctx 262144`):
-
-| GPU | VRAM | RAM | `--n-cpu-moe` | GPU exp | `-c` | VRAM used | RAM used | FIT |
-|-----|------:|-----:|--------------:|--------:|-----:|----------:|---------:|-----|
-| RTX 5090 | 32 GiB | 1 TiB | 375 | 9 / 384 | 262144 | 31837 MiB | 531562 MiB | **OK** |
-| RTX 4090 | 24 GiB | 1 TiB | 381 | 3 / 384 | 262144 | 23332 MiB | 540067 MiB | **OK** |
-
-**RTX 5090 + 1 TiB RAM** — clears the full 262144 ctx budget with ~280 MiB VRAM headroom and ~500 GiB RAM headroom. Holds 9 GPU experts (8 active needed), so the active expert set runs entirely on GPU. Per-token throughput is GPU-bound.
-
-**RTX 4090 + 1 TiB RAM** — also fits at full ctx but holds only 3 GPU experts vs the 8 active per token. On average 5 of the 8 active expert MLPs per token run on CPU instead, shifting throughput from GPU-bound to CPU-MLP-bound. Viable but noticeably slower per-token.
-
-The RTX 5090 is the clear target for a production-quality Kimi K2.6 setup on a single machine. The RTX 4090 works but pays a real throughput penalty from PCIe expert routing.
+| Host | VRAM | GPU experts @128K | RAM used | VRAM headroom | Recommendation |
+|------|------|-------------------|----------|---------------|----------------|
+| RTX 5090 | 32 GiB | 12 / 384 | 527310 MiB | ~125 MiB | ✅ Production target |
+| RTX 4090 | 24 GiB | 6 / 384 | 535815 MiB | ~438 MiB | ⚠️ Viable, fewer GPU experts |
+| T4 | 16 GiB | 0 / 384 | 544320 MiB | ~750 MiB | ⚠️ Viable, fewer GPU experts |
 
 # References
 
@@ -480,9 +382,7 @@ The RTX 5090 is the clear target for a production-quality Kimi K2.6 setup on a s
 - TCQ paper / dataset: https://huggingface.co/datasets/spiritbuun/turboquant-tcq-kv-cache
 - Qwen3.6 35B-A3B GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main
 - Gemma 4 26B-A4B-it GGUFs: https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/tree/main
-- Kimi-K2.6 UD-Q4_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF/tree/main/UD-Q4_K_XL
-- Intel Xeon Gold 5120: https://www.intel.com/content/www/us/en/products/sku/120474/intel-xeon-gold-5120-processor-19-25m-cache-2-20-ghz/specifications.html
-- NVIDIA T4 / TU104 datasheet: https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf
+- Kimi-K2.6 UD-Q4_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF/tree/main/UD-Q4_K_XL (full details in [docs/kimi-k2.6.md](docs/kimi-k2.6.md))
 
 # License
 

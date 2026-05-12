@@ -25,10 +25,17 @@ from pathlib import Path
 # which made every quant of a model look identical in size.
 def _bootstrap_gguf_py() -> None:
     # Check CWD-relative locations that may hold gguf-py.
-    candidates = [
+    candidates: list[Path] = [
         Path.cwd() / "llama.cpp" / "gguf-py",
         Path.cwd() / "gguf-py",
     ]
+    # Also check relative to this script's directory and its parents.
+    script_dir = Path(__file__).resolve().parent
+    for p in (script_dir, *script_dir.parents):
+        candidates.extend([
+            p / "llama.cpp" / "gguf-py",
+            p / "gguf-py",
+        ])
     for c in candidates:
         if (c / "gguf" / "__init__.py").is_file():
             sys.path.insert(0, str(c))
