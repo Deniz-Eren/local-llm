@@ -6,7 +6,7 @@ A personal workbench for running a large **MoE LLM** locally on a single laptop 
 
 The hard constraint that governs every decision in this repo:
 
-> The model must run within the configured VRAM and RAM budget at the longest context the host budget allows. VRAM, system RAM, and the OS reserve are parameters of `scripts/moe-configs.py` (`--vram`, `--ram`, `--os-reserve`) so sizing tracks the host machine, not a hardcoded GPU.
+> The model must run within the configured VRAM and RAM budget at the longest context the host budget allows. VRAM, RAM, and KV cache type are parameters of `scripts/moe-configs.py` (`--vram`, `--ram`, `--cache-type-k`, `--cache-type-v`) so sizing tracks the host machine, not a hardcoded GPU.
 
 If a change risks busting that budget, flag it explicitly. Do not "simplify" configs in ways that violate it.
 
@@ -14,8 +14,9 @@ If a change risks busting that budget, flag it explicitly. Do not "simplify" con
 
 `scripts/moe-configs.py` defaults reflect the current development host. Override with the flags below when running on different hardware; do not hardcode new values into the script.
 
-- **VRAM:** `--vram` MiB (default `6144` = 6 GiB). Verify with `nvidia-smi`. A driver/runtime tax (`--tax`, default `650` MiB) is subtracted to get the usable VRAM budget.
-- **RAM:** `--ram` MiB (default `32768` = 32 GiB), interpreted as *total system RAM*. `--os-reserve` MiB (default `5120` = 5 GiB) is subtracted to get the RAM budget available to llama.cpp.
+- **VRAM:** `--vram` MiB (default `6144` = 6 GiB). The usable VRAM budget is this value; the script reports actual used VRAM so overhead is visible.
+- **RAM:** `--ram` MiB (default `32768` = 32 GiB), the RAM budget available to llama.cpp. Subtract your OS / other-process overhead before passing.
+- **KV cache:** `--cache-type-k` (default `turbo4`) and `--cache-type-v` (default `turbo3_tcq`). Choices: `turbo2`, `turbo3`, `turbo2_tcq`, `turbo3_tcq`, `turbo4`, `f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`.
 
 VRAM must hold, in order of priority:
 1. all **dense** (non-expert) weights,
@@ -61,7 +62,7 @@ There are **no tests, no linters, and no CI** in this repo. Do not fabricate the
 - Don't use `-nkvo` — KV must stay on the GPU in this build.
 - Don't use `-ngl <small>` partial dense offload. We only run MoE models; the offload knob is `--n-cpu-moe`, not `-ngl`.
 - Don't omit `-c <ctx>`; the default training context busts VRAM.
-- Don't bake host-specific VRAM/RAM values into `scripts/moe-configs.py`. Sizing is parameterized via `--vram`, `--ram`, `--tax`, `--os-reserve`; change the defaults only if the development host actually changes, and never by hardcoding values inside `make_plan()`.
+- Don't bake host-specific VRAM/RAM values into `scripts/moe-configs.py`. Sizing is parameterized via `--vram`, `--ram`; change the defaults only if the development host actually changes, and never by hardcoding values inside `make_plan()`.
 - Don't restructure `README.md` into prose docs; keep it as a flat, append-friendly log.
 - Don't rewrite recorded numbers (t/s, RAM, VRAM). They are empirical measurements, not estimates.
 

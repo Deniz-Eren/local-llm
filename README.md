@@ -10,20 +10,23 @@ A 35B MoE has only ~3B parameters active per token (8 of 256 experts on Qwen3.6-
 
 `--n-cpu-moe N` keeps `N` experts pinned in RAM and **runs their MLP on CPU threads in place**; it does *not* copy expert weights to the GPU. Per token: GPU runs attention + dense layers, the router picks 8 experts, those 8 MLPs run wherever their weights live, and only the small output activations cross PCIe to be summed back into the residual stream. Throughput is gated by CPU MLP compute, not PCIe bandwidth on weight transfers.
 
-The KV cache is the other VRAM consumer. At 262144 tokens it would be ~20 GiB at FP16 — far past a 6 GiB budget. The fork's TurboQuant / TCQ KV types compress this ~5× (`turbo3_tcq` = 3.25 bpv) at ~97% of `q8_0` decode speed and constant cost across context, so KV stays GPU-resident at any context.
+The KV cache is the other VRAM consumer. At 262144 tokens it would be ~20 GiB at FP16 — far past a 6 GiB budget. The fork's TurboQuant / TCQ KV types compress this ~5× (`turbo3_tcq` = 3.25 bpv) at ~97% of `q8_0` decode speed and constant cost across context, so KV stays GPU-resident at any context. The lossless `turbo4` (4.25 bpv, ~3.8× compression) is the safe default.
 
 ## KV-cache strategy
 
-KV is GPU-resident on this build. The fork ships **Trellis-Coded Quantization (TCQ)** KV types named `turbo4`, `turbo3` / `turbo3_tcq`, and `turbo2` / `turbo2_tcq`.
+KV is GPU-resident on this build. The fork ships **Trellis-Coded Quantization (TCQ)** KV types named `turbo4` (4.25 bpv, lossless), `turbo3_tcq` / `turbo3`, and `turbo2_tcq` / `turbo2`. The `turbo4` type is scalar-like in quality (no TCQ trellis) but still compressed; `turbo3_tcq` and `turbo2_tcq` use the trellis codebook for quality that matches or beats FP16.
 
 | K / V pair                        | bpv  | KLD @2K / @7K   | KV size (rel.)         | Use when                                         |
 |-----------------------------------|------|-----------------|------------------------|--------------------------------------------------|
-| `turbo4` / `turbo4`               | 4.25 | lossless        | +20%                   | Maximum quality, VRAM headroom to spare.         |
-| **`turbo3_tcq` / `turbo3_tcq`**   | 3.25 | 0.058 / 0.074   | baseline (canonical)   | **Default.** Beats FP16 short ctx, within 2% long. |
+| **`turbo4` / `turbo3_tcq`**       | 3.75 | lossless / 0.058 | +15% vs baseline     | **Default.** Lossless keys, tight values.        |
+| `turbo4` / `turbo4`               | 4.25 | lossless        | +31% vs baseline       | Maximum quality, VRAM headroom to spare.         |
+| `turbo3_tcq` / `turbo3_tcq`       | 3.25 | 0.058 / 0.074   | baseline               | Tighter KV, still beats FP16 at short ctx.       |
 | `turbo3_tcq` / `turbo2_tcq`       | 2.75 | 0.078 / 0.101   | −15%                   | Stretch to longer contexts.                      |
 | `turbo2_tcq` / `turbo2_tcq`       | 2.25 | 0.101 / 0.136   | −31%                   | Maximum compression, accept some quality loss.   |
 
-KLD numbers from the upstream Qwen3.5-27B Q6_K bench. `q8_0` (~1.06 bytes/elem) works as a plain CUDA fallback if TCQ ever misbehaves on a new model.
+Scalar `turbo3` and `turbo2` (no trellis) have the same bpv as their TCQ counterparts but slightly higher KLD; they consume identical VRAM.
+
+The default `turbo4`/`turbo3_tcq` pair gives lossless keys (4.25 bpv) while compressing values at 3.25 bpv — asymmetric, with no quality loss on K while keeping V ~5× compressed. No KLD numbers exist for this exact asymmetric pair; the values KLD matches symmetric `turbo3_tcq` (0.058/@7K=0.074). `q8_0` (~1.06 bytes/elem) works as a plain CUDA fallback if TCQ ever misbehaves on a new model.
 
 # Build
 
@@ -51,11 +54,11 @@ cmake --build build -j$(nproc)
 # Sizing
 
 ```
-python3 scripts/moe-configs.py <model-path> --ctx 262144
-python3 scripts/moe-configs.py --scan <models-dir> --ctx 262144     # pick the best-fitting GGUF
+python3 scripts/moe-configs.py <model-path>
+python3 scripts/moe-configs.py --scan <models-dir>     # pick the best-fitting GGUF
 ```
 
-Reports the VRAM/RAM breakdown and prints the flags to use. Host budget is configurable via `--vram`, `--ram`, `--tax`, `--os-reserve` (all in MiB). Defaults: 6144 / 32768 / 650 / 5120, giving an effective ~27 GiB RAM budget for llama.cpp. Override on the command line; do not edit defaults inside the script.
+Reports the VRAM/RAM breakdown and prints the flags to use. Host budget is configurable via `--vram` and `--ram` (both in MiB). Default `--vram` is 6144 (6 GiB); default `--ram` is 32768 (32 GiB, i.e. the budget available to llama.cpp after subtracting OS overhead). KV cache types default to `turbo4` (keys) and `turbo3_tcq` (values). Default context is `--ctx 128000`; pass `--ctx 0` to use the model's trained max, or any other value to stretch as far as VRAM allows.
 
 VRAM is allocated in strict order:
 
@@ -71,13 +74,13 @@ Empirically working command on this hardware (RTX A1000 6 GiB, 32 GiB RAM):
 
 ```
 ./llama.cpp/build/bin/llama-server \
-  -m ~/Downloads/models/Qwen3.6-35B-A3B-MXFP4_MOE.gguf \
+  -m ~/Downloads/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
   --alias qwen3.6-35b \
   --n-gpu-layers 999 \
-  --n-cpu-moe 256 \
-  -ctk turbo3_tcq \
+  --n-cpu-moe 237 \
+  -ctk turbo4 \
   -ctv turbo3_tcq \
-  -c 185344 \
+  -c 128000 \
   -fa on \
   --fit off \
   -np 1 \
@@ -88,8 +91,8 @@ Empirically working command on this hardware (RTX A1000 6 GiB, 32 GiB RAM):
 
 Key flags:
 
-- `--n-gpu-layers 999` + `--n-cpu-moe N` — every non-expert tensor on GPU, `N` experts pinned in RAM. Re-derive `N` and `-c` with `scripts/moe-configs.py` whenever model or ctx changes.
-- `-ctk / -ctv turbo3_tcq` — symmetric TCQ 3-bit KV, GPU-resident. **Do not use `-nkvo`.**
+- `--n-gpu-layers 999` + `--n-cpu-moe N` — every non-expert tensor on GPU, `N` experts pinned in RAM. Re-derive `N` and `-c` with `scripts/moe-configs.py` whenever model or ctx changes. The default context is 128000 tokens.
+- `-ctk turbo4 -ctv turbo3_tcq` — default asymmetric KV: lossless keys (4.25 bpv), tight values (3.25 bpv TCQ). GPU-resident. **Do not use `-nkvo`.** With `-c 128000` (default), this costs ~4.6 GiB VRAM for the KV cache.
 - `-fa on` — flash attention; required for efficient quantized KV. Needs `GGML_CUDA_FA_ALL_QUANTS=ON` at build time.
 - `--fit off` — honor `--n-cpu-moe` verbatim instead of llama.cpp's auto-fit.
 - `-np 1` — single slot; multiple slots duplicate KV state.
@@ -128,35 +131,61 @@ For any other CPU, look up the **P-core count specifically** (not total cores, n
 
 Pinning helps too: `taskset -c 0-7 ./llama-server ...` (or the P-core CPU-list from `lscpu --extended`) keeps the scheduler from migrating workers onto E-cores or HT siblings under load.
 
+## K/V cache types (`--cache-type-k / --cache-type-v`)
+
+The script's default KV pair is **`turbo4` for keys** and **`turbo3_tcq` for values** (`--cache-type-k turbo4 --cache-type-v turbo3_tcq`). Keys are lossless (4.25 bpv) while values use 3.25 bpv TCQ — this asymmetric pairing gives lossless KV for the attention numerator while keeping values ~5× compressed.
+
+All supported types with their relative costs:
+
+| Type           | bpv  | Factor vs fp16 | KV size (rel.) |
+|----------------|------|----------------|----------------|
+| `turbo4`       | 4.25 | 0.266          | ×3.8 smaller |
+| `turbo3_tcq`   | 3.25 | 0.203          | ×4.9 smaller |
+| `turbo3`       | 3.25 | 0.203          | ×4.9 smaller |
+| `turbo2_tcq`   | 2.25 | 0.141          | ×7.1 smaller |
+| `turbo2`       | 2.25 | 0.141          | ×7.1 smaller |
+| `f16` / `bf16` | 2.0  | 1.0            | baseline |
+| `q8_0`         | ~1.0 | ~0.515         | ×1.9 smaller |
+| `q5_1`         | ~1.3 | ~0.33          | ×3.0 smaller |
+| `q5_0`         | ~1.25| ~0.312         | ×3.2 smaller |
+| `q4_1`         | ~1.1 | ~0.275         | ×3.6 smaller |
+| `q4_0`         | 1.0  | 0.5            | ×4.0 smaller |
+| `iq4_nl`       | 1.0  | 0.5            | ×4.0 smaller |
+| `f32`          | 4.0  | 2.0            | ×0.5 (2× larger) |
+
+The `--scan` table below uses the default asymmetric pair (`turbo4`/`turbo3_tcq`). To try tighter compression, pass `--cache-type-k turbo3_tcq --cache-type-v turbo3_tcq` (symmetric turbo3, ~14% smaller KV, slightly more KLD at long context) or `--cache-type-k turbo3_tcq --cache-type-v turbo2_tcq` (aggressive, ~30% smaller than default).
+
 ## Prefill vs. decode speed
 
 During a file read (the prompt), token throughput hits ~200 tok/s. During reasoning and output, it drops to ~20 tok/s. This is the prefill/decode gap inherent to autoregressive transformers, amplified by MoE routing on CPU.
 
 **Prefill** is batched: the entire prompt is tokenized and every token is processed in parallel via large GPU matrix multiplies. The GPU is fully utilized.
 
-**Decode** is sequential: each new token requires a full forward pass, and the output becomes the next input. This is memory-bandwidth bound — the model is read but only one token is produced. On this hardware the gap is wider because `--n-cpu-moe 256` puts all experts in RAM. After the GPU runs attention + dense layers, the router picks 8 active experts whose weights are pulled from RAM over PCIe and their MLP gemms run on a single CPU thread (per step). The GPU then waits for that CPU execution to finish before summing back into the residual stream. Decode latency is gated by single-threaded CPU MLP compute, not GPU throughput.
+**Decode** is sequential: each new token requires a full forward pass, and the output becomes the next input. This is memory-bandwidth bound — the model is read but only one token is produced. On this hardware with 128K context, only ~19 of the 256 experts fit on GPU — the router picks 8 active experts per token, and several of those live in RAM. After the GPU runs attention + dense layers, the router's selected experts are fetched over PCIe and their MLP gemms run on a single CPU thread (per step). The GPU then waits for that CPU execution to finish before summing back into the residual stream. Decode latency is gated by single-threaded CPU MLP compute, not GPU throughput.
 
 # Models on disk — recommended settings
 
-Generated with `python3 scripts/moe-configs.py --scan <models-dir>`. 30B variants run at `context_length = 40960` (model max); 35B variants are capped well below their 262144 trained ctx by the 6 GiB VRAM budget. FIT respects both the 6 GiB VRAM budget and the ~27 GiB RAM budget.
+Generated with `python3 scripts/moe-configs.py --scan <models-dir> --cache-type-k turbo4 --cache-type-v turbo3_tcq --ctx 128000` (default asymmetric KV pair, 128K context). 30B variants run at `context_length = 40960` (model max); 35B variants at `-c 128000` are well below their 262144 trained ctx — the 6 GiB VRAM budget is the binding constraint. FIT respects both the 6 GiB VRAM budget and the ~32 GiB RAM budget.
+
+The default `--ctx 128000` is a practical sweet spot for long-term focus on this hardware. At this context the KV cache (with `turbo4`/`turbo3_tcq`) costs ~4.6 GiB — leaving just enough headroom for a reasonable number of experts on GPU. This lets the model attend to multi-page documents, long codebases, and extended conversations without hitting the VRAM wall.
 
 | Model file                           | Size  | `--n-cpu-moe` | GPU exp     | `-c`     | VRAM used | RAM used   | FIT      |
 |--------------------------------------|------:|--------------:|------------:|---------:|----------:|-----------:|----------|
-| Qwen3-30B-A3B-Q2_K.gguf              |  11 G |            77 |   51 / 128  |    40960 |  6140 MiB |   6020 MiB | **OK**   |
-| Qwen3-30B-A3B-Q3_K_S.gguf            |  13 G |            86 |   42 / 128  |    40960 |  6119 MiB |   7982 MiB | **OK**   |
-| Qwen3.6-35B-A3B-MXFP4_MOE.gguf       |  18 G |           256 |    0 / 256  |   185344 |  6144 MiB |  18136 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q4_K_S.gguf       |  19 G |           256 |    0 / 256  |   192768 |  6144 MiB |  17478 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf      |  18 G |           256 |    0 / 256  |   185344 |  6144 MiB |  18760 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf      |  18 G |           256 |    0 / 256  |   185344 |  6144 MiB |  22796 MiB | **OK** (best fit) |
-| Qwen3.6-35B-A3B-UD-IQ3_S.gguf        |  22 G |           256 |    0 / 256  |   220416 |  6140 MiB |  11038 MiB | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf      |  18 G |           256 |    0 / 256  |   185344 |  6144 MiB |  27804 MiB | **ram**   |
-| Qwen3.6-35B-A3B-Q8_0.gguf            |  18 G |           256 |    0 / 256  |   185856 |  6141 MiB |  32640 MiB | **ram**   |
-| Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf      |  18 G |           256 |    0 / 256  |   183552 |  6140 MiB |  34080 MiB | **ram**   |
-| gemma-4-26B-A4B-it-MXFP4_MOE.gguf    |  18 G |           128 |    0 / 128  |   188672 |  6142 MiB |  13310 MiB | **OK**   |
-| gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf   |  19 G |           128 |    0 / 128  |   188672 |  6142 MiB |  19742 MiB | **OK**   |
-| gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf   |  18 G |           128 |    0 / 128  |   184832 |  6141 MiB |  23822 MiB | **OK**   |
+| Qwen3-30B-A3B-Q2_K.gguf              |  11 G |            71 |   57 / 128  |    40960 |  6080 MiB |   5551 MiB | **OK**   |
+| Qwen3-30B-A3B-Q3_K_S.gguf            |  13 G |            81 |   47 / 128  |    40960 |  6053 MiB |   7518 MiB | **OK**   |
+| Qwen3.6-35B-A3B-MXFP4_MOE.gguf       |  18 G |           239 |   17 / 239  |   128000 |  6101 MiB |  16932 MiB | **OK**   |
+| Qwen3.6-35B-A3B-Q8_0.gguf            |  18 G |           247 |    9 / 247  |   128000 |  6033 MiB |  31492 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-IQ3_S.gguf        |  22 G |           215 |   41 / 215  |   128000 |  6105 MiB |   9270 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q4_K_S.gguf       |  19 G |           237 |   19 / 237  |   128000 |  6076 MiB |  16181 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf      |  18 G |           239 |   17 / 239  |   128000 |  6142 MiB |  17514 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf      |  18 G |           242 |   14 / 242  |   128000 |  6143 MiB |  21549 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf      |  18 G |           245 |   11 / 245  |   128000 |  6091 MiB |  26609 MiB | **OK**   |
+| Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf      |  18 G |           247 |    9 / 247  |   128000 |  6120 MiB |  32882 MiB | **ram**   |
+| gemma-4-26B-A4B-it-MXFP4_MOE.gguf    |  18 G |           116 |   12 / 116  |   128000 |  6096 MiB |  12062 MiB | **OK**   |
+| gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf   |  19 G |           120 |    8 / 120  |   128000 |  6082 MiB |  18508 MiB | **OK**   |
+| gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf   |  18 G |           122 |    6 / 122  |   128000 |  6025 MiB |  22705 MiB | **OK**   |
 
-All 35B variants land at `--n-cpu-moe 256` (= 0 GPU experts): dense + KV consume the VRAM budget, leaving none for experts. UD-Q5_K_XL is the best fit — highest-quality quant whose experts still fit in RAM (~4.8 GiB headroom) at `-c 185344`. UD-Q6_K_XL / Q8_0 / UD-Q8_K_XL exceed the RAM budget; do not `--mlock` them.
+All 35B and gemma-4 variants land at `-c 128000` (default context): dense + KV consume ~6 GiB VRAM, leaving 0–40 GPU experts depending on quant quality. UD-Q4_K_S is the recommended default — good quant quality, 19 GPU experts keep the active set mostly on-GPU, and ~16 GiB RAM headroom for safety. Q8_K_XL exceeds the RAM budget; do not `--mlock` it. Q8_0 is the best overall fit if you need maximum quality and can tolerate more CPU expert routing (only 9 GPU experts).
 
 # Profiling
 

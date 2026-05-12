@@ -12,6 +12,7 @@ With --scan <dir>, evaluates every .gguf in <dir> and picks the best-fitting one
 """
 
 import argparse
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -40,13 +41,27 @@ def _bootstrap_gguf_py() -> None:
 MIB = 1024 ** 2
 GIB = 1024 ** 3
 
-# TurboQuant / TCQ KV compression factor (relative to fp16). The canonical KV
-# config is `-ctk turbo3_tcq -ctv turbo3_tcq` from the spiritbuun/buun-llama-cpp
-# fork: 3.25 bpv symmetric = 0.203x of fp16. Switch KV pairs via the `--kv-factor`
-# CLI flag (e.g. 0.266 for turbo4/turbo4, 0.172 for turbo3_tcq/turbo2_tcq,
-# 0.141 for turbo2_tcq/turbo2_tcq, 0.531 for q8_0/q8_0).
-DEFAULT_KV_FACTOR = 0.203
-KV_BYTES_PER_ELEM = 2  # fp16 baseline before the TCQ factor
+# Bytes per element for each supported KV cache type (fp16 = 2.0).
+# These are approximate and include quantization overhead (scales, etc.).
+# The "factor" relative to fp16 is bpe / 2.0.
+CACHE_TYPE_BPE: dict[str, float] = {
+    "f32":       4.0,     # 16 bits  → factor 2.0
+    "f16":       2.0,     # 16 bits  → factor 1.0
+    "bf16":      2.0,     # 16 bits  → factor 1.0
+    "q8_0":      1.03,    # 8-bit    → factor ~0.515
+    "q5_1":      0.66,    # ~5.3 bit → factor ~0.33
+    "q5_0":      0.625,   # 5 bit    → factor ~0.3125
+    "q4_1":      0.55,    # ~4.4 bit → factor ~0.275
+    "q4_0":      0.5,     # 4 bit    → factor 0.25
+    "iq4_nl":    0.5,     # 4 bit NLO → factor 0.25
+    "turbo4":0.531,      # 4.25 bpv, lossless → factor ~0.266
+    "turbo3_tcq":0.406,   # 3.25 bpv, TCQ → factor ~0.203
+    "turbo3":0.406,       # 3.25 bpv, scalar → factor ~0.203
+    "turbo2_tcq":0.281,   # 2.25 bpv, TCQ → factor ~0.141
+    "turbo2":0.281,       # 2.25 bpv, scalar → factor ~0.141
+}
+CACHE_TYPE_K_DEFAULT = "turbo4"
+CACHE_TYPE_V_DEFAULT = "turbo3_tcq"
 
 # llama.cpp rounds n_ctx UP to a multiple of CTX_PAD when it allocates the KV
 # cache (`cparams.n_ctx = GGML_PAD(cparams.n_ctx, 256)` in src/llama-context.cpp).
@@ -59,6 +74,10 @@ CTX_PAD = 256
 def align_ctx_down(n: int) -> int:
     """Largest multiple of CTX_PAD that is <= n, with a CTX_PAD floor."""
     return max(CTX_PAD, (n // CTX_PAD) * CTX_PAD)
+
+
+def _valid_cache_types() -> str:
+    return ", ".join(sorted(CACHE_TYPE_BPE))
 
 
 @dataclass
@@ -75,7 +94,6 @@ class Plan:
     cpu_experts: int
     vram_used_b: float
     vram_total_b: float
-    vram_tax_b: float
     ram_budget_b: float
     cpu_expert_b: float
     gpu_expert_b: float
@@ -83,7 +101,20 @@ class Plan:
     model_max_ctx: int
     fit_max_ctx: int
     rec_ctx: int
-    kv_factor: float
+    cache_type_k: str
+    cache_type_v: str
+    bpe_k: float
+    bpe_v: float
+
+    @property
+    def effective_factor(self) -> float:
+        """Effective compression factor relative to fp16 (averaged over K+V)."""
+        return (self.bpe_k + self.bpe_v) / 4.0
+
+    @property
+    def kv_type_str(self) -> str:
+        k, v = self.cache_type_k, self.cache_type_v
+        return k if k == v else f"K={k}, V={v}"
 
     @property
     def vram_ok(self) -> bool:
@@ -112,6 +143,12 @@ def find_gguf_py(explicit: str | None) -> None:
             if (cand / "gguf" / "__init__.py").is_file():
                 sys.path.insert(0, str(cand))
                 return
+            # Also try if cand is the llama.cpp root — gguf-py sits beside
+            # src/, models/, etc. as a sibling directory.
+            gguf_py = cand / "gguf-py"
+            if (gguf_py / "gguf" / "__init__.py").is_file():
+                sys.path.insert(0, str(gguf_py))
+                return
         raise SystemExit(
             f"--gguf-py-path does not point at a gguf-py package: {p}\n"
             "Pass the gguf-py directory (e.g. .../llama.cpp/gguf-py) or any "
@@ -129,46 +166,61 @@ class KVShape:
       * **SWA** layers whose KV is bounded by a fixed window and may use
         different (typically smaller) per-head key/value dims.
 
-    KV bytes at context `ctx` (TCQ-compressed) is therefore:
+    KV bytes at context `ctx` is:
 
         swa_const_b  +  ctx * full_per_tok_b
 
     where `swa_const_b` is independent of `ctx`. For models without SWA the
     SWA fields are zero and the formula collapses to the old linear form.
+
+    K and V cache types can differ (e.g. turbo4 for keys, turbo3 for values),
+    so bpe_k and bpe_v are tracked separately.
     """
     n_full_layers: int
     n_swa_layers: int
-    full_per_tok_per_layer_b: int   # fp16 bytes/token in one full layer
-    swa_per_tok_per_layer_b: int    # fp16 bytes/token in one SWA layer
-    sliding_window: int             # tokens of KV retained per SWA layer
-
-    def __post_init__(self) -> None:
-        # Factor is set later by make_plan; defaults to 0 before that.
-        self._kv_factor: float = 0.0
+    n_head_kv: int
+    key_len: int
+    val_len: int
+    key_len_swa: int
+    val_len_swa: int
+    sliding_window: int
+    bpe_k: float   # bytes per element for K cache type
+    bpe_v: float   # bytes per element for V cache type
 
     @property
-    def kv_factor(self) -> float:
-        return self._kv_factor if self._kv_factor > 0 else DEFAULT_KV_FACTOR
+    def full_per_layer_b(self) -> float:
+        """Bytes per full layer, per token (for K and V combined)."""
+        return self.n_head_kv * (self.key_len * self.bpe_k + self.val_len * self.bpe_v)
 
-    @kv_factor.setter
-    def kv_factor(self, value: float) -> None:
-        self._kv_factor = value
+    @property
+    def swa_per_layer_b(self) -> float:
+        """Bytes per SWA layer, per token (for K and V combined)."""
+        return self.n_head_kv * (self.key_len_swa * self.bpe_k + self.val_len_swa * self.bpe_v)
 
     @property
     def swa_const_b(self) -> float:
-        return (self.n_swa_layers * self.sliding_window
-                * self.swa_per_tok_per_layer_b * self.kv_factor)
+        """Constant bytes for SWA layers (bounded by sliding window)."""
+        return self.n_swa_layers * self.sliding_window * self.swa_per_layer_b
 
     @property
     def full_per_tok_b(self) -> float:
-        return (self.n_full_layers
-                * self.full_per_tok_per_layer_b * self.kv_factor)
+        """Bytes per token from full-attention layers."""
+        return self.n_full_layers * self.full_per_layer_b
 
     def bytes_at(self, ctx: int) -> float:
         return self.swa_const_b + ctx * self.full_per_tok_b
 
 
-def parse_metadata(model: Path) -> tuple[int, int, int, int, int, int, KVShape]:
+def _validate_cache_type(name: str) -> str:
+    """Validate a cache type name, raising SystemExit if invalid."""
+    if name not in CACHE_TYPE_BPE:
+        raise SystemExit(
+            f"Invalid cache type '{name}'. Valid types: { _valid_cache_types()}"
+        )
+    return name
+
+
+def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> tuple[int, int, int, int, int, int, KVShape]:
     """Return (layers, experts, active, dense_b, expert_b, model_max_ctx,
     KVShape).
 
@@ -208,13 +260,11 @@ def parse_metadata(model: Path) -> tuple[int, int, int, int, int, int, KVShape]:
     n_head_kv = field_uint("attention.head_count_kv")
     key_len = field_uint("attention.key_length")
     val_len = field_uint("attention.value_length")
-    full_per_tok_per_layer = n_head_kv * (key_len + val_len) * KV_BYTES_PER_ELEM
 
     # SWA geometry. Models without SWA have no swa_layers array and no
     # sliding_window key, in which case all layers are treated as full.
     key_len_swa = field_uint("attention.key_length_swa", default=key_len)
     val_len_swa = field_uint("attention.value_length_swa", default=val_len)
-    swa_per_tok_per_layer = n_head_kv * (key_len_swa + val_len_swa) * KV_BYTES_PER_ELEM
     sliding_window = field_uint("attention.sliding_window", default=0)
 
     # `attention.sliding_window_pattern` is one of:
@@ -240,9 +290,14 @@ def parse_metadata(model: Path) -> tuple[int, int, int, int, int, int, KVShape]:
     kv_shape = KVShape(
         n_full_layers=n_full_layers,
         n_swa_layers=n_swa_layers,
-        full_per_tok_per_layer_b=full_per_tok_per_layer,
-        swa_per_tok_per_layer_b=swa_per_tok_per_layer,
+        n_head_kv=n_head_kv,
+        key_len=key_len,
+        val_len=val_len,
+        key_len_swa=key_len_swa,
+        val_len_swa=val_len_swa,
         sliding_window=sliding_window,
+        bpe_k=CACHE_TYPE_BPE[cache_type_k],
+        bpe_v=CACHE_TYPE_BPE[cache_type_v],
     )
 
     dense_b = 0
@@ -261,31 +316,31 @@ def kv_bytes(ctx: int, kv_shape: KVShape) -> float:
 
 
 def max_fit_ctx(kv_shape: KVShape, dense_b: float,
-                vram_mib: int, tax_mib: int) -> int:
-    """Largest context such that tax + dense + KV fits in VRAM. KV is
+                vram_mib: int) -> int:
+    """Largest context such that dense + KV fits in VRAM. KV is
     `swa_const + ctx * full_per_tok` (linear in ctx), so closed-form."""
-    vram_for_kv_b = vram_mib * MIB - tax_mib * MIB - dense_b - kv_shape.swa_const_b
+    vram_for_kv_b = vram_mib * MIB - dense_b - kv_shape.swa_const_b
     if vram_for_kv_b <= 0:
         return 0
     if kv_shape.full_per_tok_b <= 0:
         # No full-attention layers: KV is bounded by the SWA window for every
         # layer, so any ctx fits as far as KV is concerned. Return a sentinel
         # large enough that `model_max_ctx` and `--ctx` always clamp first.
-        return 10 ** 9
+        return math.inf
     return int(vram_for_kv_b // kv_shape.full_per_tok_b)
 
 
 def make_plan(model: Path, vram_mib: int, ram_mib: int,
-              tax_mib: int, ctx: int | None,
-              kv_factor: float = DEFAULT_KV_FACTOR) -> "Plan":
+              ctx: int | None,
+              cache_type_k: str, cache_type_v: str) -> "Plan":
     """Build a sizing Plan with this VRAM allocation precedence:
 
       1. **Dense backbone:** all non-expert tensors are placed on the GPU.
-      2. **KV cache:** target ctx is the user-supplied `--ctx` (or, if
-         omitted, the model's trained `context_length`). It is capped to
-         `model_max_ctx` and capped further to whatever fits in VRAM after
-         the dense backbone, then rounded down to a multiple of CTX_PAD so
-         the value matches what llama.cpp actually allocates.
+      2. **KV cache:** target ctx defaults to 128000 (or the user-supplied
+         `--ctx`, or the model's trained `context_length` if `--ctx 0`).
+         It is capped to `model_max_ctx` and further to whatever fits in
+         VRAM after the dense backbone, then rounded down to a multiple of
+         CTX_PAD so the value matches what llama.cpp actually allocates.
       3. **Experts:** any VRAM left over after dense + KV is filled with as
          many experts as fit. The remaining experts live in RAM and run on
          CPU when routed.
@@ -295,15 +350,14 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
     every routed token. The verdict surfaces this via `gpu_experts == 0`.
     """
     (layers, experts, active, dense_b, expert_b, model_max_ctx,
-     kv_shape) = parse_metadata(model)
+     kv_shape) = parse_metadata(model, cache_type_k, cache_type_v)
     if experts <= 0:
         raise ValueError("expert_count is 0 — this script targets MoE models only.")
 
-    kv_shape.kv_factor = kv_factor
     per_expert_b = expert_b / experts
 
     # Step 2a: largest ctx that fits with just the dense backbone reserved.
-    fit_ctx_raw = max_fit_ctx(kv_shape, dense_b, vram_mib, tax_mib)
+    fit_ctx_raw = max_fit_ctx(kv_shape, dense_b, vram_mib)
     fit_max_ctx = align_ctx_down(min(model_max_ctx, max(0, fit_ctx_raw)))
 
     # Step 2b: cap the requested (or default) ctx by model_max and VRAM-fit.
@@ -315,8 +369,8 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
             reasons.append(f"model_max_ctx={model_max_ctx}")
         if requested_ctx > fit_ctx_raw:
             reasons.append(f"VRAM-fit max={fit_max_ctx}")
-        print(f"NOTE: requested --ctx {ctx} clamped to {chosen_ctx} "
-              f"({', '.join(reasons) or 'CTX_PAD alignment'}).",
+        print(f"NOTE: {model.name}: requested --ctx {ctx} clamped to "
+              f"{chosen_ctx} ({', '.join(reasons) or 'CTX_PAD alignment'}).",
               file=sys.stderr)
 
     rec_ctx = align_ctx_down(min(model_max_ctx, max(1, fit_ctx_raw)))
@@ -324,11 +378,10 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
     kv_b = kv_bytes(chosen_ctx, kv_shape)
 
     vram_total_b = vram_mib * MIB
-    vram_tax_b = tax_mib * MIB
     ram_budget_b = ram_mib * MIB
 
     # Step 3: fill remaining VRAM with experts.
-    vram_after_kv_b = vram_total_b - vram_tax_b - dense_b - kv_b
+    vram_after_kv_b = vram_total_b - dense_b - kv_b
     if vram_after_kv_b <= 0 or per_expert_b <= 0:
         gpu_experts = 0
     else:
@@ -337,17 +390,19 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
 
     gpu_expert_b = gpu_experts * per_expert_b
     cpu_expert_b = cpu_experts * per_expert_b
-    vram_used_b = dense_b + kv_b + gpu_expert_b + vram_tax_b
+    vram_used_b = dense_b + kv_b + gpu_expert_b
 
     return Plan(
         model=model, layers=layers, experts=experts, active=active,
         dense_b=dense_b, expert_b=expert_b, per_expert_b=per_expert_b,
         kv_b=kv_b, gpu_experts=gpu_experts, cpu_experts=cpu_experts,
-        vram_used_b=vram_used_b, vram_total_b=vram_total_b, vram_tax_b=vram_tax_b,
+        vram_used_b=vram_used_b, vram_total_b=vram_total_b,
         ram_budget_b=ram_budget_b, cpu_expert_b=cpu_expert_b,
         gpu_expert_b=gpu_expert_b, ctx=chosen_ctx,
         model_max_ctx=model_max_ctx, fit_max_ctx=fit_max_ctx, rec_ctx=rec_ctx,
-        kv_factor=kv_factor,
+        cache_type_k=cache_type_k, cache_type_v=cache_type_v,
+        bpe_k=CACHE_TYPE_BPE[cache_type_k],
+        bpe_v=CACHE_TYPE_BPE[cache_type_v],
     )
 
 
@@ -360,10 +415,11 @@ def fmt_gib(b: float) -> str:
 
 
 def flag_line(p: Plan) -> str:
-    return f"--n-gpu-layers 999 --n-cpu-moe {p.n_cpu_moe} -c {p.ctx}"
+    return (f"--n-gpu-layers 999 --n-cpu-moe {p.n_cpu_moe} -c {p.ctx} "
+            f"-ctk {p.cache_type_k} -ctv {p.cache_type_v}")
 
 
-def print_full_report(p: Plan, vram_mib: int, ram_mib: int, tax_mib: int) -> None:
+def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
     print(f"Model:            {p.model}")
     print(f"Layers:           {p.layers}")
     print(f"Experts (total):  {p.experts}  (active per token: {p.active})")
@@ -374,16 +430,16 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int, tax_mib: int) -> Non
     print(f"  Dense backbone:        {fmt_mib(p.dense_b)}")
     print(f"  All experts:           {fmt_mib(p.expert_b)}")
     print(f"  One expert:            {fmt_mib(p.per_expert_b)}")
-    print(f"  KV cache (TCQ x{p.kv_factor:.3f}):  {fmt_mib(p.kv_b)}")
+    eff = p.effective_factor
+    print(f"  KV cache ({p.kv_type_str}, eff {eff:.3f}x):  {fmt_mib(p.kv_b)}")
     print()
-    print(f"=== VRAM plan (budget {vram_mib - tax_mib} MiB) ===")
+    print(f"=== VRAM plan (budget {vram_mib} MiB) ===")
     print(f"  Dense backbone:        {fmt_mib(p.dense_b)}")
     print(f"  KV cache:              {fmt_mib(p.kv_b)}")
     print(f"  Experts on GPU ({p.gpu_experts:>3}):  {fmt_mib(p.gpu_expert_b)}")
     print(f"  (precedence: dense -> KV cache (capped to fit) -> experts)")
     print(f"  -------------------------------------")
-    used_no_tax = p.vram_used_b - p.vram_tax_b
-    print(f"  Used:                  {fmt_mib(used_no_tax)}  ({fmt_gib(used_no_tax)})")
+    print(f"  Used:                  {fmt_mib(p.vram_used_b)}  ({fmt_gib(p.vram_used_b)})")
     print(f"  Headroom:              {fmt_mib(p.vram_total_b - p.vram_used_b)}")
     print()
     print(f"=== RAM plan (budget {int(p.ram_budget_b / MIB)} MiB) ===")
@@ -410,8 +466,8 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int, tax_mib: int) -> Non
 
 
 def scan_dir(scan_path: Path, vram: int, ram: int,
-             tax: int, ctx: int | None, quiet: bool,
-             kv_factor: float = DEFAULT_KV_FACTOR) -> int:
+             ctx: int | None, quiet: bool,
+             cache_type_k: str, cache_type_v: str) -> int:
     ggufs = sorted(scan_path.glob("*.gguf"))
     if not ggufs:
         raise SystemExit(f"No .gguf files found in {scan_path}")
@@ -419,7 +475,7 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
     rows = []
     for g in ggufs:
         try:
-            p = make_plan(g, vram, ram, tax, ctx, kv_factor)
+            p = make_plan(g, vram, ram, ctx, cache_type_k, cache_type_v)
             rows.append((g, p, None))
         except Exception as e:  # noqa: BLE001
             rows.append((g, None, str(e)))
@@ -453,11 +509,16 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
         g, p = best
         print(f"# {g.name}")
         print(f"-m {g} {flag_line(p)}")
+        if p.gpu_experts < p.active:
+            print(f"# WARNING: {p.gpu_experts} GPU experts < {p.active} active; "
+                  f"{p.active - p.gpu_experts} of {p.active} active experts run on CPU per token",
+                  file=sys.stderr)
         return 0
 
     name_w = max(len(g.name) for g, _, _ in rows)
     ctx_label = "auto (per-model)" if ctx is None else str(ctx)
-    print(f"Scanning {scan_path}  (vram={vram} MiB, ram={ram} MiB, tax={tax} MiB, ctx={ctx_label})")
+    print(f"Scanning {scan_path}  (vram={vram} MiB, ram={ram} MiB, "
+          f"k={cache_type_k}, v={cache_type_v}, ctx={ctx_label})")
     print()
     header = (f"{'MODEL'.ljust(name_w)}  {'CTX':>7}  {'MAX':>7}  "
               f"{'VRAM used':>11}  {'RAM used':>11}  {'GPU/CPU exp':>12}  FIT  FLAG")
@@ -477,7 +538,7 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
     if best:
         g, p = best
         print(f"Best fit: {g.name}")
-        print(f"  ./llama.cpp/build/bin/llama-server -m {g} {flag_line(p)} -ctk turbo3_tcq -ctv turbo3_tcq -fa on")
+        print(f"  ./llama.cpp/build/bin/llama-server -m {g} {flag_line(p)} -fa on")
         return 0
     print("No model fits the VRAM+RAM budget at the given context length.", file=sys.stderr)
     return 1
@@ -491,27 +552,27 @@ def main() -> int:
     ap.add_argument("--vram", type=int, default=6144,
                     help="Total VRAM in MiB (default: 6144 = 6 GiB)")
     ap.add_argument("--ram",  type=int, default=32768,
-                    help="Total system RAM in MiB (default: 32768 = 32 GiB). "
-                         "The script subtracts --os-reserve to get the budget "
-                         "available to llama.cpp.")
-    ap.add_argument("--tax",  type=int, default=650,
-                    help="VRAM reserved for driver/runtime in MiB (default: 650)")
-    ap.add_argument("--os-reserve", type=int, default=5120, dest="os_reserve",
-                    help="RAM reserved for OS and other processes in MiB "
-                         "(default: 5120 = 5 GiB). Subtracted from --ram to get "
-                         "the RAM budget available to llama.cpp.")
-    ap.add_argument("--ctx",  type=int, default=None,
-                    help="Context length used for KV-cache sizing. Default: per-model recommended "
-                         "= min(model trained max, largest VRAM-fitting context).")
+                    help="RAM budget available to llama.cpp in MiB (default: 32768 = 32 GiB). "
+                         "Subtract your OS / other-process overhead before passing.")
+    ap.add_argument("--cache-type-k", default=CACHE_TYPE_K_DEFAULT,
+                    help=f"KV cache type for keys (default: {CACHE_TYPE_K_DEFAULT}). "
+                         f"Choices: {_valid_cache_types()}")
+    ap.add_argument("--cache-type-v", default=CACHE_TYPE_V_DEFAULT,
+                    help=f"KV cache type for values (default: {CACHE_TYPE_V_DEFAULT}). "
+                         f"Choices: {_valid_cache_types()}")
+    ap.add_argument("--ctx",  type=int, default=128000,
+                    help="Context length used for KV-cache sizing (default: 128000). "
+                         "Pass --ctx 0 to use the model's trained max context, or a larger value "
+                         "to stretch as far as VRAM allows.")
     ap.add_argument("--quiet", "-q", action="store_true",
                     help="Print only the recommended llama-server flags")
-    ap.add_argument("--kv-factor", type=float, default=DEFAULT_KV_FACTOR,
-                    help=f"KV cache compression factor (default: {DEFAULT_KV_FACTOR} for "
-                         "turbo3_tcq/turbo3_tcq; use 0.266 for turbo4/turbo4, "
-                         "0.172 for turbo3_tcq/turbo2_tcq, etc.)")
     ap.add_argument("--gguf-py-path", default=None,
                     help="Path to the gguf-py directory inside an llama.cpp checkout (auto-detected if omitted)")
     args = ap.parse_args()
+
+    # Validate cache types
+    cache_type_k = _validate_cache_type(args.cache_type_k)
+    cache_type_v = _validate_cache_type(args.cache_type_v)
 
     if not args.scan and not args.gguf:
         ap.error("provide a gguf path or --scan DIR")
@@ -524,20 +585,20 @@ def main() -> int:
         scan_path = Path(args.scan).expanduser()
         if not scan_path.is_dir():
             raise SystemExit(f"--scan path is not a directory: {scan_path}")
-        return scan_dir(scan_path, args.vram, max(0, args.ram - args.os_reserve),
-                        args.tax, args.ctx, args.quiet, args.kv_factor)
+        return scan_dir(scan_path, args.vram, args.ram,
+                        args.ctx, args.quiet, cache_type_k, cache_type_v)
 
     model = Path(args.gguf).expanduser()
     if not model.is_file():
         raise SystemExit(f"Model not found: {model}")
 
-    plan = make_plan(model, args.vram, max(0, args.ram - args.os_reserve),
-                     args.tax, args.ctx, args.kv_factor)
+    plan = make_plan(model, args.vram, args.ram,
+                     args.ctx, cache_type_k, cache_type_v)
     if args.quiet:
         print(flag_line(plan))
         return 0 if plan.fits else 1
 
-    print_full_report(plan, args.vram, args.ram, args.tax)
+    print_full_report(plan, args.vram, args.ram)
     return 0 if plan.fits else 1
 
 
