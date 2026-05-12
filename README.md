@@ -36,7 +36,7 @@ llama.cpp fork that adds the `turbo*` KV types with CUDA kernels (KV stays on th
 
 This fork is a **temporary** dependency: once upstream [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) lands TurboQuant / TCQ support, this repo will switch back to upstream.
 
-```
+```bash
 git clone -b master git@github.com:spiritbuun/buun-llama-cpp.git llama.cpp
 cd llama.cpp
 cmake -B build \
@@ -45,15 +45,66 @@ cmake -B build \
   -DGGML_CUDA_FA=ON \
   -DGGML_CUDA_FA_ALL_QUANTS=ON \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
-  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_FLAGS="-O3" \
+  -DCMAKE_CXX_FLAGS="-O3"
 cmake --build build -j$(nproc)
 ```
 
 `CMAKE_CUDA_ARCHITECTURES=86` targets the RTX A1000's sm_86 — adjust for your GPU. `GGML_CUDA_FA_ALL_QUANTS=ON` is required so flash-attention kernels are compiled for the quantized KV types; `-fa on` with `turbo*` KV silently falls back without it.
 
+### AVX-512 build
+
+On CPUs with AVX-512F support, build with `GGML_AVX512=ON`. The `-march` is handled automatically by `-DGGML_NATIVE=ON`:
+
+```bash
+cmake -B build \
+  -DGGML_CUDA=ON \
+  -DGGML_NATIVE=ON \
+  -DGGML_CUDA_FA=ON \
+  -DGGML_CUDA_FA_ALL_QUANTS=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=75 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_AVX512=ON \
+  -DCMAKE_C_FLAGS="-O3" \
+  -DCMAKE_CXX_FLAGS="-O3"
+```
+
+Two parts are required:
+- **`-DGGML_AVX512=ON`** — cmake preprocessor define that enables the AVX-512 code paths in ggml source.
+- **`-DGGML_NATIVE=ON`** — auto-detects the CPU and passes `-march=native` to the compiler so it emits the correct instruction set (including AVX-512F on compatible CPUs).
+
+Without the cmake option, the AVX-512 blocks aren't compiled at all, so you get AVX2 only — half the per-cycle GEMM throughput on the CPU-side expert MLPs.
+
+#### Checking which AVX-512 extensions your CPU supports
+
+To check what your CPU supports:
+
+```bash
+# Check if the CPU advertises AVX-512 extensions
+grep -oP 'avx512(f|bw|vl|vnni|bf16|vbmi)' /proc/cpuinfo
+```
+
+Or use `lscpu`:
+
+```bash
+lscpu | grep -i avx
+```
+
+Then enable the matching cmake options:
+
+| Extension | cmake flag | First microarch | What it speeds up |
+|-----------|-----------|-----------------|-------------------|
+| AVX-512F (base) | `GGML_AVX512=ON` | Skylake | All 512-bit GEMM paths |
+| AVX-512BW | `GGML_AVX512_BW=ON` | Cascade Lake | Byte/word GEMM ops |
+| AVX-512VL | *(bundled with F)* | Skylake | Vector length 256/512 |
+| AVX-512VNNI | `GGML_AVX512_VNNI=ON` | Cascade Lake | INT8 matmul (MoE experts) |
+| AVX-512BF16 | `GGML_AVX512_BF16=ON` | Cooper Lake / Zen 4 | BF16 GEMM |
+| AVX-512VBMI | `GGML_AVX512_VBMI=ON` | Cannon Lake | Vector byte/word ops |
+
 # Sizing
 
-```
+```bash
 python3 scripts/moe-configs.py <model-path>
 python3 scripts/moe-configs.py --scan <models-dir>     # pick the best-fitting GGUF
 ```
@@ -72,7 +123,7 @@ There is no expert floor: if dense + KV consume the budget, every expert goes to
 
 Empirically working command on this hardware (RTX A1000 6 GiB, 32 GiB RAM):
 
-```
+```bash
 ./llama.cpp/build/bin/llama-server \
   -m ~/Downloads/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
   --alias qwen3.6-35b \
@@ -189,7 +240,7 @@ All 35B and gemma-4 variants land at `-c 128000` (default context): dense + KV c
 
 # Profiling
 
-```
+```bash
 sudo nsys profile -o llama_profile ./llama.cpp/build/bin/llama-server ...
 ```
 
@@ -215,7 +266,7 @@ llama-server ships a built-in chat UI. Once the server is running, open `http://
 
 Or via environment:
 
-```
+```bash
 export ANTHROPIC_BASE_URL="http://0.0.0.0:8080/v1"
 export ANTHROPIC_AUTH_TOKEN="local-development"
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
@@ -276,49 +327,152 @@ Point Pi at the same `llama-server` instance running locally. The provider name 
 
 # Future platform — Kimi K2.6
 
-Scoping a heavier host for Kimi K2.6 (sparse MoE, much larger than the Qwen3.6 family). Target hardware under consideration:
+Kimi K2.6 is a sparse MoE model much larger than the Qwen3.6 family. We have an experimentation host and are profiling its fit.
 
-- **GPU:** NVIDIA RTX 5090, 32 GiB VRAM
-- **RAM:** 1 TiB
+## Experiment host hardware
 
-Sizing approach: build the full GGUF locally, then run `scripts/moe-configs.py` against it with `--vram 32768 --ram 1048576` to get the recommended `--n-cpu-moe / -c` and the dense + KV + expert breakdown. The verdict tells us whether the platform clears the budget at the desired context, and how much headroom remains for further quants or longer ctx.
+| Component | Model | Details |
+|-----------|-------|--------|
+| **CPU** | Intel Xeon Gold 5120 | 14 cores / 28 threads, Skylake-SP, AVX-512, 2.20 GHz ([spec sheet](https://www.intel.com/content/www/us/en/products/sku/120474/intel-xeon-gold-5120-processor-19-25m-cache-2-20-ghz/specifications.html)) |
+| **RAM** | 530 GB | DDR4 ECC |
+| **GPU** | NVIDIA TU104-895-A1 (T4) | 16 GB GDDR6, 4096 CUDA cores, Tensor Cores ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf)) |
 
-We are testing with the **UD-Q4_K_XL** quant — 14 shards totalling ~544 GiB on disk, merging to a single `Kimi-K2.6-UD-Q4_K_XL.gguf` of ~544 GiB (583.7 GB).
+## Model
 
-## Merging the split GGUF
+We are testing with the **UD-Q4_K_XL** quant from Unsloth — 14 shards totalling ~544 GiB on disk, merged to a single `Kimi-K2.6-UD-Q4_K_XL.gguf` (~544 GiB).
+
+### Merging the split GGUF
 
 Unsloth ships Kimi-K2.6 as 14 split shards. Merge them into a single GGUF with `llama-gguf-split` from the same build used to run the server:
 
-```
+```bash
 ./llama.cpp/build/bin/llama-gguf-split --merge \
-  ~/Downloads/models/Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf \
-  ~/Downloads/models/Kimi-K2.6-UD-Q4_K_XL.gguf
+  ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf \
+  ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf
 ```
 
 Pass only the **first** shard (`00001-of-00014`) plus the desired output path; `llama-gguf-split` discovers the remaining shards from the filename pattern and refuses if any of `00002`..`00014` are missing. All 14 files must be present in the same directory before merging.
 
 After the merge succeeds, the shards can be deleted; only the merged file is needed at runtime.
 
-## Sizing run
+### Model metadata
 
-Run `scripts/moe-configs.py` against the merged GGUF on each candidate host:
+| Property | Value |
+|----------|-------|
+| Layers | 61 |
+| Experts (total) | 384 |
+| Active per token | 8 |
+| Dense backbone | 12343 MiB |
+| One expert | ~1418 MiB |
+| All experts | ~544320 MiB (~531 GiB) |
+| Trained context | 262144 |
 
+## Build with AVX-512
+
+The Xeon Gold 5120 (Skylake-SP) supports AVX-512F — build with `GGML_AVX512=ON`. `-DGGML_NATIVE=ON` handles `-march=native` automatically.
+
+```bash
+cd llama.cpp
+cmake -B build \
+  -DGGML_CUDA=ON \
+  -DGGML_NATIVE=ON \
+  -DGGML_CUDA_FA=ON \
+  -DGGML_CUDA_FA_ALL_QUANTS=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=75 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGGML_AVX512=ON \
+  -DCMAKE_C_FLAGS="-O3" \
+  -DCMAKE_CXX_FLAGS="-O3"
+cmake --build build -j$(nproc)
 ```
+
+Key flags:
+- **`-DGGML_AVX512=ON`** — enables the AVX-512 code paths in ggml source (Skylake-SP supports AVX-512F, CD, ER, PF, VL only — not VBMI, VNNI, or BF16).
+- **`-DGGML_NATIVE=ON`** — auto-detects the CPU and passes `-march=native` so the compiler emits the right instruction set (including AVX-512F on the Xeon Gold 5120).
+- **`-DCMAKE_C/CXX_FLAGS="-O3"`** — maximum optimization level for CPU-side compute.
+- **`-DCMAKE_CUDA_ARCHITECTURES=75`** — targets the T4's Turing architecture (sm_75).
+- **`-DCMAKE_BUILD_TYPE=Release`** — optimize build type.
+
+AVX-512 accelerates the CPU-side expert MLPs that `--n-cpu-moe` keeps in RAM. Without it, the Xeon Gold 5120 falls back to AVX2 (256-bit), halving the per-cycle throughput of the expert GEMM kernels.
+
+## Sizing
+
+The host has 16 GiB VRAM and 530 GiB RAM. With `turbo3_tcq` KV at `-c 20000`, the script fits the model:
+
+```bash
 python3 scripts/moe-configs.py \
-  ~/Downloads/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
-  --vram <vram-mib> --ram <ram-mib> --ctx 262144
+  ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf \
+  --vram 16384 --ram 542720 \
+  --cache-type-k turbo3_tcq --cache-type-v turbo3_tcq \
+  --ctx 20000
 ```
 
-Model fixed facts (from the GGUF metadata): 61 layers, 384 experts, 8 active per token, dense backbone 12343 MiB, one expert ~1418 MiB, all experts ~544320 MiB, KV cache ~6736 MiB at `turbo3_tcq` and `-c 262144`.
+Result:
 
-| GPU       | VRAM   | RAM   | `--n-cpu-moe` | GPU exp     | `-c`     | VRAM used | RAM used     | FIT     |
-|-----------|-------:|------:|--------------:|------------:|---------:|----------:|-------------:|---------|
-| RTX 5090  | 32 GiB | 1 TiB |           375 |   9 / 384   |   262144 | 31837 MiB |  531562 MiB  | **OK**  |
-| RTX 4090  | 24 GiB | 1 TiB |           381 |   3 / 384   |   262144 | 23332 MiB |  540067 MiB  | **OK**  |
+```
+Context:          19968  (model max: 262144, VRAM-fit max: 157184)
+  KV cache:             513.12 MiB
+  Experts on GPU (  2):    2835.00 MiB
+  VRAM used:          15691.53 MiB
+  RAM used:          541485.00 MiB
+  Flags: --n-cpu-moe 382 -c 19968 -ctk turbo3_tcq -ctv turbo3_tcq
+```
 
-The RTX 5090 + 1 TiB RAM row clears the budget at full 262144 ctx with ~280 MiB VRAM headroom and ~500 GiB RAM headroom — i.e. the GPU is the binding constraint, not RAM. The RAM headroom is large enough to absorb a heavier KV pair (`turbo4`/`turbo4`) or a higher quant if desired.
+**Note:** We use `-c 20000` (rounded to 19968 by CTX_PAD alignment) as a practical profiling limit — it keeps the KV cache small (~513 MiB) for faster iteration during experimentation. The hardware can easily support much larger contexts: the VRAM-fit max is 157184 tokens at `turbo3_tcq`, and 128000 is the preferred default for long-term work. Lower `-c` simply keeps VRAM profiling manageable while the model is still being profiled.
 
-The RTX 4090 + 1 TiB RAM row also fits at full ctx but holds only 3 GPU experts vs the 8 active per token, so on average ~5 of the 8 active expert MLPs per token run on CPU instead of GPU. Throughput is then dominated by CPU MLP compute. The 5090 row clears 8 GPU experts (with one to spare), so the active set runs entirely on the GPU and per-token throughput is GPU-bound.
+### Config strategy comparison
+
+| Configuration | KV cache | GPU experts | VRAM used | RAM used | Notes |
+|---------------|----------|-------------|-----------|----------|-------|
+| **`@ 20K — profiling`** | | | | | |
+| `turbo3_tcq` / `turbo3_tcq` | 513 MiB | 2 / 382 | 15692 MiB | 541485 MiB | Default for profiling |
+| `turbo4` / `turbo4` | 671 MiB | 2 / 382 | 15850 MiB | 541485 MiB | Lossless keys |
+| `turbo4` / `turbo3_tcq` | 597 MiB | 2 / 382 | 15775 MiB | 541485 MiB | Asymmetric: lossless K, tight V |
+| `turbo3_tcq` / `turbo2_tcq` | 439 MiB | 2 / 382 | 15617 MiB | 541485 MiB | Tightest |
+| **`@ 128K — long-term`** | | | | | |
+| `turbo3_tcq` / `turbo3_tcq` | 3289 MiB | 0 / 384 | 15633 MiB | 544320 MiB | 0 GPU; 8 active experts on CPU |
+| `turbo4` / `turbo4` | 4035 MiB | 0 / 384 | 16379 MiB | 544320 MiB | Lossless; 0 GPU; VRAM nearly full |
+| `turbo4` / `turbo3_tcq` | 3825 MiB | 0 / 384 | 16169 MiB | 544320 MiB | Asymmetric; 0 GPU |
+| `turbo3_tcq` / `turbo2_tcq` | 2813 MiB | 0 / 384 | 15156 MiB | 544320 MiB | Tightest; still 0 GPU at 128K | |
+
+At this VRAM budget the bottleneck is always RAM-side expert routing: only 2 of 384 experts fit on GPU, meaning 6 of the 8 active experts per token run on CPU. The 530 GiB RAM budget accommodates all 382 CPU-side experts (~531 GiB) with only ~1.2 GiB headroom — tight but sufficient.
+
+## Canonical run command
+
+```bash
+./llama.cpp/build/bin/llama-server \
+  -m ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf \
+  --alias kimi-k2.6 \
+  --n-gpu-layers 999 \
+  --n-cpu-moe 382 \
+  -ctk turbo3_tcq \
+  -ctv turbo3_tcq \
+  -c 20000 \
+  -fa on \
+  --fit off \
+  -np 1 \
+  --host 0.0.0.0 --port 8080 \
+  --no-mmap
+```
+
+- `--n-cpu-moe 382` — only 2 experts fit on the 16 GiB GPU; the rest run on CPU.
+- `-c 20000` — profiling context; increase toward 128000 for long-term use when ready.
+- `--threads 28` — set to the full thread count for the Xeon Gold 5120 (14 physical cores × 2 threads each) since it's a non-hybrid processor.
+
+### Hypothetical future platforms
+
+The sizing script can also evaluate what a heavier host would enable. Running the same GGUF with `--vram 32768 --ram 1048576` (32 GiB VRAM / 1 TiB RAM, `turbo3_tcq`, `--ctx 262144`):
+
+| GPU | VRAM | RAM | `--n-cpu-moe` | GPU exp | `-c` | VRAM used | RAM used | FIT |
+|-----|------:|-----:|--------------:|--------:|-----:|----------:|---------:|-----|
+| RTX 5090 | 32 GiB | 1 TiB | 375 | 9 / 384 | 262144 | 31837 MiB | 531562 MiB | **OK** |
+| RTX 4090 | 24 GiB | 1 TiB | 381 | 3 / 384 | 262144 | 23332 MiB | 540067 MiB | **OK** |
+
+**RTX 5090 + 1 TiB RAM** — clears the full 262144 ctx budget with ~280 MiB VRAM headroom and ~500 GiB RAM headroom. Holds 9 GPU experts (8 active needed), so the active expert set runs entirely on GPU. Per-token throughput is GPU-bound.
+
+**RTX 4090 + 1 TiB RAM** — also fits at full ctx but holds only 3 GPU experts vs the 8 active per token. On average 5 of the 8 active expert MLPs per token run on CPU instead, shifting throughput from GPU-bound to CPU-MLP-bound. Viable but noticeably slower per-token.
+
+The RTX 5090 is the clear target for a production-quality Kimi K2.6 setup on a single machine. The RTX 4090 works but pays a real throughput penalty from PCIe expert routing.
 
 # References
 
@@ -327,6 +481,8 @@ The RTX 4090 + 1 TiB RAM row also fits at full ctx but holds only 3 GPU experts 
 - Qwen3.6 35B-A3B GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main
 - Gemma 4 26B-A4B-it GGUFs: https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/tree/main
 - Kimi-K2.6 UD-Q4_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF/tree/main/UD-Q4_K_XL
+- Intel Xeon Gold 5120: https://www.intel.com/content/www/us/en/products/sku/120474/intel-xeon-gold-5120-processor-19-25m-cache-2-20-ghz/specifications.html
+- NVIDIA T4 / TU104 datasheet: https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf
 
 # License
 
