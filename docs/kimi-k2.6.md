@@ -8,7 +8,7 @@ Kimi K2.6 is a sparse MoE model much larger than the Qwen3.6 family. We are prof
 |-----------|-------|--------|
 | **CPU** | Intel Xeon Gold 5120 | 14 cores / 28 threads, Skylake-SP, AVX-512, 2.20 GHz ([spec sheet](https://www.intel.com/content/www/us/en/products/sku/120474/intel-xeon-gold-5120-processor-19-25m-cache-2-20-ghz/specifications.html)) |
 | **RAM** | 530 GB | DDR4 ECC |
-| **GPU** | NVIDIA TU104-895-A1 (T4) | 16 GB GDDR6, 4096 CUDA cores, Tensor Cores ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf)) |
+| **GPU** | NVIDIA TU104-895-A1 (T4) | 16 GB GDDR6 (16384 MiB), 4096 CUDA cores, Tensor Cores ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf)) |
 
 ## Model
 
@@ -70,7 +70,22 @@ AVX-512 accelerates the CPU-side expert MLPs that `--n-cpu-moe` keeps in RAM. Wi
 
 ## Sizing
 
-The host has 16 GiB VRAM and 530 GiB RAM. With `turbo3_tcq` KV at `-c 20000`, the script fits the model:
+The host has 16384 MiB VRAM and 530 GiB RAM. Note: the T4 ships with ECC memory enabled by default, which reserves ~1 GiB for error correction — reducing usable VRAM to 15360 MiB. Disable it before profiling:
+
+```bash
+sudo nvidia-smi -e 0
+# Disabled ECC support for GPU 00000000:00:05.0.
+# All done.
+# Reboot required.
+```
+
+After disabling ECC, `nvidia-smi` reports the full 16384 MiB:
+
+| GPU | Name | Memory-Usage |
+|-----|------|-------------|
+| 0 | Tesla T4 | 0 MiB / 16384 MiB |
+
+With `turbo3_tcq` KV at `-c 20000`, the script fits the model:
 
 ```bash
 python3 scripts/moe-configs.py \
