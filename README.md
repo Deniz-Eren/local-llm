@@ -126,7 +126,7 @@ Evaluates every `.gguf` in `<dir>` and prints a markdown table with the best-fit
 ./scripts/scan-all.sh <models-dir> --vram 6144 --ram 32768 --ctx 128000
 ```
 
-Scans all models across multiple KV cache configurations (turbo4/turbo3_tcq, turbo3_tcq/turbo3_tcq, turbo4/turbo4, turbo3_tcq/turbo2_tcq) and outputs a combined markdown or CSV table (`--format csv`). See `./scripts/scan-all.sh --help` for all options.
+Scans all models across multiple KV cache configurations (`turbo4` / `turbo3_tcq`, `turbo3_tcq` / `turbo3_tcq`, `turbo4` / `turbo4`, `turbo3_tcq` / `turbo2_tcq`) and outputs a combined markdown or CSV table (`--format csv`). See `./scripts/scan-all.sh --help` for all options.
 
 VRAM is allocated in strict order:
 
@@ -255,27 +255,97 @@ During a file read (the prompt), token throughput hits ~200 tok/s. During reason
 
 # Models on disk — recommended settings
 
-Generated with `python3 scripts/moe-configs.py --scan <models-dir> --cache-type-k turbo4 --cache-type-v turbo3_tcq --ctx 128000` (default asymmetric KV pair, 128K context). 30B variants run at `context_length = 40960` (model max); 35B variants at `-c 128000` are well below their 262144 trained ctx — the 6 GiB VRAM budget is the binding constraint. FIT respects both the 6 GiB VRAM budget and the ~32 GiB RAM budget.
+Scanned with `./scripts/scan-all.sh <models-dir> --vram 6144 --ram 32768 --ctx 128000`. 30B variants run at `context_length = 40960` (model max); 35B/gemma-4 variants at `-c 128000` are well below their 262144 trained ctx — the 6 GiB VRAM budget is the binding constraint. FIT respects both the 6 GiB VRAM budget and the ~32 GiB RAM budget.
 
 The default `--ctx 128000` is a practical sweet spot for long-term focus on this hardware. At this context the KV cache (with `turbo4`/`turbo3_tcq`) costs ~4.6 GiB — leaving just enough headroom for a reasonable number of experts on GPU. This lets the model attend to multi-page documents, long codebases, and extended conversations without hitting the VRAM wall.
 
-| Model file                           | Size  | `--n-cpu-moe` | GPU exp     | `-c`     | VRAM used | RAM used   | tokens/sec | FIT      |
-|--------------------------------------|------:|--------------:|------------:|---------:|----------:|-----------:|:----------:|----------|
-| Qwen3-30B-A3B-Q2_K.gguf              |  11 G |            71 |   57 / 128  |    40960 |  6080 MiB |   5551 MiB |            | **OK**   |
-| Qwen3-30B-A3B-Q3_K_S.gguf            |  13 G |            81 |   47 / 128  |    40960 |  6053 MiB |   7518 MiB |            | **OK**   |
-| Qwen3.6-35B-A3B-MXFP4_MOE.gguf       |  18 G |           239 |   17 / 239  |   128000 |  6101 MiB |  16932 MiB |            | **OK**   |
-| Qwen3.6-35B-A3B-Q8_0.gguf            |  18 G |           247 |    9 / 247  |   128000 |  6033 MiB |  31492 MiB |            | **OK**   |
-| Qwen3.6-35B-A3B-UD-IQ3_S.gguf        |  22 G |           215 |   41 / 215  |   128000 |  6105 MiB |   9270 MiB |            | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q4_K_S.gguf       |  19 G |           237 |   19 / 237  |   128000 |  6076 MiB |  16181 MiB |            | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf      |  18 G |           239 |   17 / 239  |   128000 |  6142 MiB |  17514 MiB |            | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf      |  18 G |           242 |   14 / 242  |   128000 |  6143 MiB |  21549 MiB |            | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf      |  18 G |           245 |   11 / 245  |   128000 |  6091 MiB |  26609 MiB |            | **OK**   |
-| Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf      |  18 G |           247 |    9 / 247  |   128000 |  6120 MiB |  32882 MiB |            | **ram**   |
-| gemma-4-26B-A4B-it-MXFP4_MOE.gguf    |  18 G |           116 |   12 / 116  |   128000 |  6096 MiB |  12062 MiB |            | **OK**   |
-| gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf   |  19 G |           120 |    8 / 120  |   128000 |  6082 MiB |  18508 MiB |            | **OK**   |
-| gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf   |  18 G |           122 |    6 / 122  |   128000 |  6025 MiB |  22705 MiB |            | **OK**   |
+| Config | `ctx` | `max_ctx` | VRAM used | RAM used | GPU/CPU | FIT | tokens/s | tokens/s <br> @ 100K |
+|--------|------:|----------:|----------:|----------|--------:|----------|---|--------|
+| **Qwen3-30B-A3B-Q2_K.gguf** | | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 40960 | 40960 | 6080 MiB | 5551 MiB | 57/71 | **OK** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 40960 | 40960 | 6116 MiB | 5395 MiB | 59/69 | **OK** | | |
+| `turbo4` / `turbo4` | 40960 | 40960 | 6121 MiB | 5630 MiB | 56/72 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 40960 | 40960 | 6074 MiB | 5317 MiB | 60/68 | **OK** | | |
+| **Qwen3-30B-A3B-Q3_K_S.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 40960 | 40960 | 6053 MiB | 7518 MiB | 47/81 | **OK** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 40960 | 40960 | 6118 MiB | 7332 MiB | 49/79 | **OK** | | |
+| `turbo4` / `turbo4` | 40960 | 40960 | 6080 MiB | 7611 MiB | 46/82 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 40960 | 40960 | 6091 MiB | 7239 MiB | 50/78 | **OK** | | |
+| **Qwen3.6-35B-A3B-MXFP4_MOE.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6101 MiB | 16932 MiB | 17/239 | **OK** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6143 MiB | 16577 MiB | 22/234 | **OK** | | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6130 MiB | 17215 MiB | 13/243 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6114 MiB | 16294 MiB | 26/230 | **OK** | | |
+| **Qwen3.6-35B-A3B-Q8_0.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6033 MiB | 31492 MiB | 9/247 | **OK** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6103 MiB | 31110 MiB | 12/244 | **OK** | | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6091 MiB | 31748 MiB | 7/249 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6046 MiB | 30855 MiB | 14/242 | **OK** | | |
+| **Qwen3.6-35B-A3B-UD-IQ3_S.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6105 MiB | 9270 MiB | 41/215 | **OK** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6137 MiB | 8925 MiB | 49/207 | **OK** | | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6116 MiB | 9572 MiB | 34/222 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6127 MiB | 8623 MiB | 56/200 | **OK** | | |
+| **Qwen3.6-35B-A3B-UD-Q4_K_S.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6076 MiB | 16181 MiB | 19/237 | **OK** | 19 t/s | 13 t/s |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6105 MiB | 15839 MiB | 24/232 | **OK** | | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6116 MiB | 16454 MiB | 15/241 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6134 MiB | 15498 MiB | 29/227 | **OK** | | |
+| **Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6142 MiB | 17514 MiB | 17/239 | **OK** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6123 MiB | 17221 MiB | 21/235 | **OK** | | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6088 MiB | 17881 MiB | 12/244 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6104 MiB | 16928 MiB | 25/231 | **OK** | | |
+| **Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6143 MiB | 21549 MiB | 14/242 | **OK** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6098 MiB | 21282 MiB | 17/239 | **OK** | | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6100 MiB | 21906 MiB | 10/246 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6142 MiB | 20926 MiB | 21/235 | **OK** | | |
+| **Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6091 MiB | 26609 MiB | 11/245 | **OK** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6105 MiB | 26283 MiB | 14/242 | **OK** | | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6078 MiB | 26935 MiB | 8/248 | **OK** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6118 MiB | 25958 MiB | 17/239 | **OK** | | |
+| **Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf** | | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6120 MiB | 32882 MiB | 9/247 | **ram** | | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6074 MiB | 32616 MiB | 11/245 | **OK** | | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6033 MiB | 33281 MiB | 6/250 | **ram** | | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6028 MiB | 32349 MiB | 13/243 | **OK** | | |
+| **gemma-4-26B-A4B-it-MXFP4_MOE.gguf** | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6096 MiB | 12062 MiB | 12/116 | **OK** | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6090 MiB | 11750 MiB | 15/113 | **OK** | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6103 MiB | 12374 MiB | 9/119 | **OK** | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6083 MiB | 11438 MiB | 18/110 | **OK** | |
+| **gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf** | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6082 MiB | 18508 MiB | 8/120 | **OK** | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6072 MiB | 18200 MiB | 10/118 | **OK** | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 6093 MiB | 18817 MiB | 6/122 | **OK** | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6062 MiB | 17891 MiB | 12/116 | **OK** | |
+| **gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf** | | | | | | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6025 MiB | 22705 MiB | 6/122 | **OK** | |
+| `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6078 MiB | 22333 MiB | 8/120 | **OK** | |
+| `turbo4` / `turbo4` | 128000 | 262144 | 5972 MiB | 23077 MiB | 4/124 | **OK** | |
+| `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6132 MiB | 21961 MiB | 10/118 | **OK** | |
 
-All 35B and gemma-4 variants land at `-c 128000` (default context): dense + KV consume ~6 GiB VRAM, leaving 0–40 GPU experts depending on quant quality. UD-Q4_K_S is the recommended default — good quant quality, 19 GPU experts keep the active set mostly on-GPU, and ~16 GiB RAM headroom for safety. Q8_K_XL exceeds the RAM budget; do not `--mlock` it. Q8_0 is the best overall fit if you need maximum quality and can tolerate more CPU expert routing (only 9 GPU experts).
+Scanning four KV configurations per model reveals which configs stay within budget. `turbo3_tcq` / `turbo2_tcq` (tightest KV) generally fits where `turbo4` / `turbo4` (lossless K+V) overflows RAM — e.g. `Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf` fits with `turbo3_tcq` KV but not with `turbo4` KV. UD-Q4_K_S is the recommended default — good quant quality, 19 GPU experts (with `turbo4` / `turbo3_tcq`), and ~16 GiB RAM headroom for safety.
+
+## Measuring tokens/second
+
+To record throughput across a run, append `2>&1 | tee server_logs.txt` to the `llama-server` command so all stderr (where `llama-server` emits timing) is captured:
+
+```bash
+./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf 2>&1 | tee server_logs.txt
+```
+
+Then extract tokens/second values from the log:
+
+```bash
+grep "ms/tok" server_logs.txt \
+  | sed 's/.*(\([0-9.]*\)ms\/tok).*/\1/' \
+  | awk '{print 1000/$1}' > tps_history.csv
+```
+
+The `ms/tok` line repeats each step during decode; the `sed`/`awk` pipeline converts ms/tok → tok/s and writes a one-column CSV for plotting or averaging.
 
 # Profiling
 
