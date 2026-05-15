@@ -259,7 +259,7 @@ Scanned with `./scripts/scan-all.sh <models-dir> --vram 6144 --ram 32768 --ctx 1
 
 The default `--ctx 128000` is a practical sweet spot for long-term focus on this hardware. At this context the KV cache (with `turbo4`/`turbo3_tcq`) costs ~4.6 GiB — leaving just enough headroom for a reasonable number of experts on GPU. This lets the model attend to multi-page documents, long codebases, and extended conversations without hitting the VRAM wall.
 
-| Config | `ctx` | `max_ctx` | VRAM used | RAM used | GPU/CPU | FIT | tokens/s | tokens/s <br> @ 100K |
+| Config | `ctx` | `max_ctx` | VRAM used | RAM used | GPU/CPU | FIT | tokens/s | tokens/s <br> @ 40K |
 |--------|------:|----------:|----------:|----------|--------:|----------|---|--------|
 | **Qwen3-30B-A3B-Q2_K.gguf** | | | | | | | | |
 | `turbo4` / `turbo3_tcq` | 40960 | 40960 | 6080 MiB | 5551 MiB | 57/71 | **OK** | | |
@@ -317,7 +317,7 @@ The default `--ctx 128000` is a practical sweet spot for long-term focus on this
 | `turbo4` / `turbo4` | 128000 | 262144 | 6103 MiB | 12374 MiB | 9/119 | **OK** | |
 | `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6083 MiB | 11438 MiB | 18/110 | **OK** | |
 | **gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf** | | | | | | |
-| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6082 MiB | 18508 MiB | 8/120 | **OK** | |
+| `turbo4` / `turbo3_tcq` | 128000 | 262144 | 6082 MiB | 18508 MiB | 8/120 | **OK** | 10 t/s | 7.4 t/s |
 | `turbo3_tcq` / `turbo3_tcq` | 128000 | 262144 | 6072 MiB | 18200 MiB | 10/118 | **OK** | |
 | `turbo4` / `turbo4` | 128000 | 262144 | 6093 MiB | 18817 MiB | 6/122 | **OK** | |
 | `turbo3_tcq` / `turbo2_tcq` | 128000 | 262144 | 6062 MiB | 17891 MiB | 12/116 | **OK** | |
