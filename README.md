@@ -452,7 +452,7 @@ See **[docs/kimi-k2.6.md](docs/kimi-k2.6.md)** for full details: experiment host
 - TCQ paper / dataset: https://huggingface.co/datasets/spiritbuun/turboquant-tcq-kv-cache
 - Qwen3.6 35B-A3B GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main
 - Gemma 4 26B-A4B-it GGUFs: https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/tree/main
-- Kimi-K2.6 UD-Q4_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF/tree/main/UD-Q4_K_XL (full details in [docs/kimi-k2.6.md](docs/kimi-k2.6.md))
+- Kimi-K2.6 UD-Q4_K_XL and UD-Q8_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF (full details in [docs/kimi-k2.6.md](docs/kimi-k2.6.md))
 
 # License
 

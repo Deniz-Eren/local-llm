@@ -7,7 +7,7 @@ Kimi K2.6 is a sparse MoE model much larger than the Qwen3.6 family. We are prof
 | Component | Model | Details |
 |-----------|-------|--------|
 | **CPU** | Intel Xeon Gold 5120 | 14 cores / 28 threads, Skylake-SP, AVX-512, 2.20 GHz ([spec sheet](https://www.intel.com/content/www/us/en/products/sku/120474/intel-xeon-gold-5120-processor-19-25m-cache-2-20-ghz/specifications.html)) |
-| **RAM** | 530 GB | DDR4 ECC |
+| **RAM** | 740 GB | DDR4 ECC (test server) |
 | **GPU** | NVIDIA TU104-895-A1 (T4) | 16 GB GDDR6 (16384 MiB), 4096 CUDA cores, Tensor Cores ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf)) |
 
 ## Model
@@ -40,6 +40,71 @@ After the merge succeeds, the shards can be deleted; only the merged file is nee
 | All experts | ~544320 MiB (~531 GiB) |
 | Trained context | 262144 |
 
+## Kimi-K2.6-UD-Q8_K_XL.gguf
+
+A higher-fidelity quantization is also tested. The UD-Q8_K_XL GGUF is ~554 GiB on disk.
+
+### Model metadata
+
+| Property | Value |
+|----------|-------|
+| Layers | 61 |
+| Experts (total) | 384 |
+| Active per token | 8 |
+| Dense backbone | 22675 MiB |
+| One expert | ~1418 MiB |
+| All experts | 544320 MiB (~531 GiB) |
+| Trained context | 262144 |
+| On disk | ~554 GiB |
+
+### Q8_K_XL on T4 (16 GiB VRAM)
+
+The dense backbone alone is ~22150 MiB — exceeding the T4's 16 GiB budget. The model is **not viable** on this host.
+
+```
+Context:          256  (model max: 262144, VRAM-fit max: 256)
+  Dense backbone:    22675.30 MiB
+  KV cache:             6.58 MiB
+  Experts on GPU (  0):    0.00 MiB
+  VRAM used:          22681.88 MiB  (OVER BUDGET by ~6298 MiB)
+  RAM used:          544320.00 MiB
+  Flags: --n-cpu-moe 384 -c 256 -ctk turbo3_tcq -ctv turbo3_tcq
+```
+
+### Q8_K_XL on RTX 4090 (24 GiB VRAM)
+
+| Configuration | KV cache | GPU experts | `--ctx` (clamped) | VRAM used | RAM used | Notes |
+|---------------|----------|-------------|-------------------:|----------:|---------:|-------|
+| **`@ 20K — profiling`** | | | | | | |
+| `turbo3_tcq` / `turbo3_tcq` | 513 MiB | 0 / 384 | 19968 | 23188 MiB | 544320 MiB | 0 GPU; VRAM headroom: 1388 MiB |
+| `turbo4` / `turbo4` | 671 MiB | 0 / 384 | 19968 | 23346 MiB | 544320 MiB | Lossless keys |
+| `turbo4` / `turbo3_tcq` | 597 MiB | 0 / 384 | 19968 | 23272 MiB | 544320 MiB | Asymmetric |
+| `turbo3_tcq` / `turbo2_tcq` | 439 MiB | 0 / 384 | 19968 | 23114 MiB | 544320 MiB | Tightest |
+| **`@ 128K — long-term`** | | | | | | |
+| `turbo3_tcq` / `turbo3_tcq` | 1895 MiB | 0 / 384 | 73728 | 24570 MiB | 544320 MiB | VRAM-fit max; 0 GPU |
+| `turbo4` / `turbo4` | 1893 MiB | 0 / 384 | 56320 | 24568 MiB | 544320 MiB | VRAM-fit max; 0 GPU |
+| `turbo3_tcq` / `turbo4` | 1898 MiB | 0 / 384 | 64512 | 24573 MiB | 544320 MiB | Asymmetric; 0 GPU |
+| `turbo3_tcq` / `turbo2_tcq` | 1896 MiB | 0 / 384 | 86272 | 24571 MiB | 544320 MiB | Tightest; 0 GPU |
+| `turbo4` / `turbo3_tcq` | 1897 MiB | 0 / 384 | 63488 | 24573 MiB | 544320 MiB | Asymmetric; 0 GPU |
+| `turbo4` / `turbo2_tcq` | 1895 MiB | 0 / 384 | 72448 | 24571 MiB | 544320 MiB | 0 GPU |
+
+At 128K context the RTX 4090 holds **0 GPU experts** — the dense backbone (~22.2 GiB) plus a 128K KV cache (~1.9 GiB) consumes essentially all 24 GiB. The context clamp ranges from 56320 (`turbo4`/`turbo4`) to 86272 (`turbo3_tcq`/`turbo2_tcq`). All 384 experts run on CPU.
+
+### Q8_K_XL on RTX 5090 (32 GiB VRAM)
+
+| Configuration | `--n-cpu-moe` | GPU exp | `--ctx` | VRAM used | RAM used | FIT |
+|---------------|--------------:|--------:|-------:|----------:|---------:|-----|
+| `turbo3_tcq` | 380 | 4 / 384 | 128000 | 31635 MiB | 538650 MiB | **OK** |
+| `turbo4` / `turbo4` | 380 | 4 / 384 | 128000 | 32647 MiB | 538650 MiB | **OK** |
+| `turbo4` / `turbo3_tcq` | 380 | 4 / 384 | 128000 | 32171 MiB | 538650 MiB | **OK** |
+| `turbo3_tcq` / `turbo4` | 380 | 4 / 384 | 128000 | 32111 MiB | 538650 MiB | **OK** |
+| `turbo3_tcq` / `turbo2_tcq` | 379 | 5 / 384 | 128000 | 32575 MiB | 537232 MiB | **OK** |
+| `turbo4` / `turbo2_tcq` | 380 | 4 / 384 | 128000 | 31694 MiB | 538650 MiB | **OK** |
+
+At 128K context with `turbo3_tcq`/`turbo3_tcq` the RTX 5090 holds **4 GPU experts**. The tightest fit is `turbo4`/`turbo4` with only ~121 MiB headroom. `turbo3_tcq`/`turbo2_tcq` gains a 5th GPU expert by compressing the V cache, with ~193 MiB headroom.
+
+**Verdict:** The Q8_K_XL quant demands ~10 GiB more VRAM for the dense backbone than the Q4_K_XL variant. On the T4 it is not viable. On the RTX 4090 it fits at 128K but holds 0 GPU experts — every token routes all 8 active experts from CPU RAM. On the RTX 5090 it holds 4-5 GPU experts at 128K, making it a reasonable fit for long-term use.
+
 ## Build with AVX-512
 
 The Xeon Gold 5120 (Skylake-SP) supports AVX-512F — build with `GGML_AVX512=ON`. `-DGGML_NATIVE=ON` handles `-march=native` automatically.
@@ -70,7 +135,7 @@ AVX-512 accelerates the CPU-side expert MLPs that `--n-cpu-moe` keeps in RAM. Wi
 
 ## Sizing
 
-The host has 16384 MiB VRAM and 530 GiB RAM. Note: the T4 ships with ECC memory enabled by default, which reserves ~1 GiB for error correction — reducing usable VRAM to 15360 MiB. Disable it before profiling:
+The host has 16384 MiB VRAM and 740 GiB RAM. Note: the T4 ships with ECC memory enabled by default, which reserves ~1 GiB for error correction — reducing usable VRAM to 15360 MiB. Disable it before profiling:
 
 ```bash
 sudo nvidia-smi -e 0
@@ -90,7 +155,7 @@ With `turbo3_tcq` KV at `-c 20000`, the script fits the model:
 ```bash
 python3 scripts/moe-configs.py \
   ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf \
-  --vram 16384 --ram 542720 \
+  --vram 16384 --ram 757708 \
   --cache-type-k turbo3_tcq --cache-type-v turbo3_tcq \
   --ctx 20000
 ```
@@ -123,7 +188,7 @@ Context:          19968  (model max: 262144, VRAM-fit max: 157184)
 | `turbo4` / `turbo3_tcq` | 3825 MiB | 0 / 384 | 16169 MiB | 544320 MiB | Asymmetric; 0 GPU |
 | `turbo3_tcq` / `turbo2_tcq` | 2813 MiB | 0 / 384 | 15156 MiB | 544320 MiB | Tightest; still 0 GPU at 128K |
 
-At this VRAM budget only 2 of 384 experts fit on GPU (128K context: 0). The remaining experts run on CPU — by design — and the 530 GiB RAM budget accommodates all 382 CPU-side experts (~531 GiB) with only ~1.2 GiB headroom.
+At this VRAM budget only 2 of 384 experts fit on GPU (128K context: 0). The remaining experts run on CPU — by design — and the 740 GiB RAM budget accommodates all 382 CPU-side experts (~531 GiB) with ~210 GiB headroom.
 
 ## Canonical run command
 
@@ -197,7 +262,7 @@ At `-c 262144` the RTX 4090 drops to **3 GPU experts**, since the larger KV cach
 
 ## References
 
-- Kimi-K2.6 UD-Q4_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF/tree/main/UD-Q4_K_XL
+- Kimi-K2.6 UD-Q4_K_XL and UD-Q8_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF
 - Intel Xeon Gold 5120 spec sheet: https://www.intel.com/content/www/us/en/products/sku/120474/intel-xeon-gold-5120-processor-19-25m-cache-2-20-ghz/specifications.html
 - NVIDIA T4 / TU104 datasheet: https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf
 
