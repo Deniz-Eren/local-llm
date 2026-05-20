@@ -72,7 +72,7 @@ Examples:
 
   # Explicit expert count, 128K context, custom port
   ./scripts/run-server.sh -m ~/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
-      --n-cpu-moe 382 --ctx 128000 --port 8081 --alias kimi-k2.6
+      --n-cpu-moe 382 --ctx 128000 --port 8081 --alias Kimi-K2.6
 
   # Tighter KV, fewer threads for a hybrid CPU
   ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
@@ -82,7 +82,7 @@ Examples:
   # Explicit mmap / mlock flags (Kimi K2.6 canonical)
   ./scripts/run-server.sh -m ~/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
       --n-cpu-moe 382 --threads 28 --mlock --no-mmap \
-      --alias kimi-k2.6
+      --alias Kimi-K2.6
 
   # Try fit mode to let llama.cpp auto-fit experts to VRAM
   ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \

@@ -164,7 +164,7 @@ The repo includes `scripts/run-server.sh` to launch the server with MoE expert r
 
 # Explicit expert count, 128K context, custom port
 ./scripts/run-server.sh -m ~/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
-    --n-cpu-moe 382 --ctx 128000 --port 8081 --alias kimi-k2.6
+    --n-cpu-moe 382 --ctx 128000 --port 8081 --alias Kimi-K2.6
 
 # Tighter KV, fewer threads for a hybrid CPU
 ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
@@ -454,7 +454,7 @@ Point Pi at the same `llama-server` instance running locally. The provider name 
 
 Kimi K2.6 is a sparse MoE model much larger than the Qwen3.6 family. We are profiling its fit across different host platforms.
 
-See **[docs/kimi-k2.6.md](docs/kimi-k2.6.md)** for full details: experiment host hardware, model metadata, merge instructions, AVX-512 build, sizing scans, and hypothetical RTX 5090 / RTX 4090 platform analysis.
+See **[docs/Kimi-K2.6.md](docs/Kimi-K2.6.md)** for full details: experiment host hardware, model metadata, merge instructions, AVX-512 build, sizing scans, and hypothetical RTX 5090 / RTX 4090 platform analysis.
 
 | Host | VRAM | GPU experts @128K | RAM used | VRAM headroom | Recommendation |
 |------|------|-------------------|----------|---------------|----------------|
@@ -468,7 +468,7 @@ See **[docs/kimi-k2.6.md](docs/kimi-k2.6.md)** for full details: experiment host
 - TCQ paper / dataset: https://huggingface.co/datasets/spiritbuun/turboquant-tcq-kv-cache
 - Qwen3.6 35B-A3B GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main
 - Gemma 4 26B-A4B-it GGUFs: https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/tree/main
-- Kimi-K2.6 UD-Q4_K_XL and UD-Q8_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF (full details in [docs/kimi-k2.6.md](docs/kimi-k2.6.md))
+- Kimi-K2.6 UD-Q4_K_XL and UD-Q8_K_XL GGUFs: https://huggingface.co/unsloth/Kimi-K2.6-GGUF (full details in [docs/Kimi-K2.6.md](docs/Kimi-K2.6.md))
 
 # License
 

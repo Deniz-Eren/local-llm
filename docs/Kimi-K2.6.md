@@ -216,7 +216,7 @@ At this VRAM budget only 2 of 384 experts fit on GPU (128K context: 0). The rema
 ```bash
 ./llama.cpp/build/bin/llama-server \
   -m ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf \
-  --alias kimi-k2.6 \
+  --alias Kimi-K2.6 \
   --n-gpu-layers 999 \
   --n-cpu-moe 382 \
   -ctk turbo3_tcq \
