@@ -59,3 +59,8 @@ Context:          262144  (model max: 262144, VRAM-fit max: 262144)
 === llama-server flag ===
   --n-gpu-layers 999 --n-cpu-moe 234 -c 262144 -ctk q8_0 -ctv q8_0
 ```
+
+# References
+
+- Qwen3.6 35B-A3B MTP GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF
+- Qwen3.6 35B-A3B standard GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
