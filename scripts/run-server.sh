@@ -27,6 +27,8 @@ THREADS=""
 FA="on"
 FIT="off"
 NP=1
+SPEC_TYPE=""
+SPEC_DRAFT_N_MAX=""
 NO_MMAP=""
 MLOCK=""
 
@@ -57,6 +59,12 @@ Options:
                           is redundant unless you want to be explicit.)
   --mlock                 Pin model weights in RAM (mlock).
   --quiet                 Run non-interactively (no server output).
+  --fit off|on            Expert auto-fit mode (default: off).
+  --spec-type TYPE        Speculative decoding type (e.g. draft-mtp).
+                          Omit to skip speculative decoding entirely.
+  --spec-draft-n-max N    Draft tokens per speculative step
+                          (default: 3; requires --spec-type).
+  --flash-attn on|off     Flash attention (default: on).
 
 Examples:
   # Auto-size from GGUF, run on this machine's hardware defaults
@@ -75,6 +83,15 @@ Examples:
   ./scripts/run-server.sh -m ~/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
       --n-cpu-moe 382 --threads 28 --mlock --no-mmap \
       --alias kimi-k2.6
+
+  # Try fit mode to let llama.cpp auto-fit experts to VRAM
+  ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
+      --fit on
+
+  # Speculative decoding with MTP draft tokens
+  ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf \
+      --n-cpu-moe 86 --ctx 128000 --alias qwen3.6-ud \
+      --spec-type draft-mtp --spec-draft-n-max 3
 EOF
   exit 1
 }
@@ -92,6 +109,10 @@ while [[ $# -gt 0 ]]; do
     --host)             HOST="$2";         shift 2 ;;
     --port)             PORT="$2";         shift 2 ;;
     --llama-cpp-dir)    LLAMA_CPP_DIR="$2"; shift 2 ;;
+    --fit)              FIT="$2";          shift 2 ;;
+    --flash-attn)       FA="$2";          shift 2 ;;
+    --spec-type)        SPEC_TYPE="$2";    shift 2 ;;
+    --spec-draft-n-max) SPEC_DRAFT_N_MAX="$2"; shift 2 ;;
     --quiet)            QUIET=true;        shift ;;
     --no-mmap)          NO_MMAP=1;         shift ;;
     --mlock)            MLOCK=1;           shift ;;
@@ -109,14 +130,13 @@ SERVER="${LLAMA_CPP_DIR}/build/bin/llama-server"
 # Auto-detect expert count from moe-configs.py if not given
 if [[ -z "$N_CPU_MOE" ]]; then
   echo "Auto-sizing from moe-configs.py ..."
-  FLAGS=$(python3 "$(dirname "$0")/moe-configs.py" "$MODEL" --quiet 2>/dev/null)
-  [[ $? -ne 0 ]] && { echo "Error: moe-configs.py failed"; exit 1; }
+  FLAGS=$(python3 "$(dirname "$0")/moe-configs.py" "$MODEL" --quiet --json 2>/dev/null) || { echo "Error: moe-configs.py failed"; exit 1; }
 
-  # Extract --n-cpu-moe and -c from the flag line
-  N_CPU_MOE=$(echo "$FLAGS" | grep -oP '(?<=--n-cpu-moe )\d+')
-  CTX=$(echo "$FLAGS"   | grep -oP '(?<=-c )\d+')
-  CTK=$(echo "$FLAGS"   | grep -oP '(?<=-ctk )\S+')
-  CTV=$(echo "$FLAGS"   | grep -oP '(?<=-ctv )\S+')
+  # Extract fields from JSON via jq
+  N_CPU_MOE=$(echo "$FLAGS" | jq -r '.n_cpu_moe')
+  CTX=$(echo "$FLAGS"       | jq -r '.ctx')
+  CTK=$(echo "$FLAGS"       | jq -r '.cache_type_k')
+  CTV=$(echo "$FLAGS"       | jq -r '.cache_type_v')
 
   # Auto-detect threads (fall back to nproc).
   # For hybrid Intel CPUs, always set --threads to the P-core count explicitly.
@@ -126,6 +146,23 @@ fi
 CTK="${CTK:-turbo4}"
 CTV="${CTV:-turbo3_tcq}"
 CTX="${CTX:-128000}"
+
+# Auto-detect threads (P-cores for hybrid Intel)
+if [[ -z "$THREADS" ]]; then
+  if grep -q 'Intel' /proc/cpuinfo 2>/dev/null; then
+    if command -v lscpu &>/dev/null; then
+      # P-cores: physical cores × sockets
+      THREADS=$(lscpu | awk '/^Core\(s\) per socket:/ {cores=$NF}
+          /^Socket\(s\):/ {sockets=$NF}
+          END {print cores*sockets}')
+    else
+      THREADS=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || nproc)
+    fi
+  else
+    THREADS=$(nproc)
+  fi
+  echo "Auto-detected threads: $THREADS"
+fi
 
 # ── build command ───────────────────────────────────────────────────────────
 CMD=(
@@ -142,6 +179,9 @@ CMD=(
   --host "$HOST"
   --port "$PORT"
 )
+# Speculative decoding (MTP / draft tokens)
+[[ -n "$SPEC_TYPE" ]]    && CMD+=(--spec-type "$SPEC_TYPE")
+[[ -n "$SPEC_DRAFT_N_MAX" ]] && CMD+=(--spec-draft-n-max "$SPEC_DRAFT_N_MAX")
 
 # Optional flags
 [[ -n "$ALIAS" ]]     && CMD+=(--alias "$ALIAS")

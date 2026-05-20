@@ -1,1 +1,2 @@
-llama.cpp/
+.venv/
+__pycache__/

@@ -12,24 +12,38 @@ With --scan <dir>, evaluates every .gguf in <dir> and picks the best-fitting one
 """
 
 import argparse
+import json
 import math
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# gguf-py (vendored in the llama.cpp source tree) gives us GGUFReader, which
-# exposes both KV metadata fields and per-tensor n_bytes (the actual on-disk
-# byte size, accounting for the quant type). Without this we'd be reading the
-# element count from gguf_dump's text output and mistaking it for bytes —
-# which made every quant of a model look identical in size.
+# ── gguf-py bootstrap (consolidated) ────────────────────────────────────────
+MIB = 1024 ** 2
+GIB = 1024 ** 3
+
+
+def _find_gguf_py_root(candidate: Path) -> Path | None:
+    """Walk from *candidate* up the tree looking for gguf/__init__.py.
+    Also check the sibling gguf-py directory if candidate looks like a
+    llama.cpp checkout root."""
+    for root in (candidate, *candidate.parents):
+        if (root / "gguf" / "__init__.py").is_file():
+            return root
+        # Also try if root is the llama.cpp root — gguf-py sits beside
+        # src/, models/, etc. as a sibling directory.
+        gguf_py = root / "gguf-py"
+        if (gguf_py / "gguf" / "__init__.py").is_file():
+            return gguf_py
+    return None
+
+
 def _bootstrap_gguf_py() -> None:
-    # Check CWD-relative locations that may hold gguf-py.
     candidates: list[Path] = [
         Path.cwd() / "llama.cpp" / "gguf-py",
         Path.cwd() / "gguf-py",
     ]
-    # Also check relative to this script's directory and its parents.
     script_dir = Path(__file__).resolve().parent
     for p in (script_dir, *script_dir.parents):
         candidates.extend([
@@ -37,16 +51,39 @@ def _bootstrap_gguf_py() -> None:
             p / "gguf-py",
         ])
     for c in candidates:
-        if (c / "gguf" / "__init__.py").is_file():
-            sys.path.insert(0, str(c))
+        root = _find_gguf_py_root(c)
+        if root is not None:
+            sys.path.insert(0, str(root))
             return
     raise SystemExit(
         "Could not locate gguf-py under ./llama.cpp/gguf-py or ./gguf-py. "
         "Pass --gguf-py-path /path/to/gguf-py to point at it explicitly."
     )
 
-MIB = 1024 ** 2
-GIB = 1024 ** 3
+
+def find_gguf_py(explicit: str | None) -> None:
+    if explicit:
+        p = Path(explicit).expanduser()
+        root = _find_gguf_py_root(p)
+        if root is not None:
+            sys.path.insert(0, str(root))
+            return
+        # Fallback: try the original logic for backwards compatibility
+        for cand in (p, *p.parents):
+            if (cand / "gguf" / "__init__.py").is_file():
+                sys.path.insert(0, str(cand))
+                return
+            gguf_py = cand / "gguf-py"
+            if (gguf_py / "gguf" / "__init__.py").is_file():
+                sys.path.insert(0, str(gguf_py))
+                return
+        raise SystemExit(
+            f"--gguf-py-path does not point at a gguf-py package: {p}\n"
+            "Pass the gguf-py directory (e.g. .../llama.cpp/gguf-py) or any "
+            "path inside it."
+        )
+    _bootstrap_gguf_py()
+
 
 # Bytes per element for each supported KV cache type (fp16 = 2.0).
 # These are approximate and include quantization overhead (scales, etc.).
@@ -61,11 +98,11 @@ CACHE_TYPE_BPE: dict[str, float] = {
     "q4_1":      0.55,    # ~4.4 bit → factor ~0.275
     "q4_0":      0.5,     # 4 bit    → factor 0.25
     "iq4_nl":    0.5,     # 4 bit NLO → factor 0.25
-    "turbo4":0.531,      # 4.25 bpv, lossless → factor ~0.266
+    "turbo4":    0.531,   # 4.25 bpv, lossless → factor ~0.266
     "turbo3_tcq":0.406,   # 3.25 bpv, TCQ → factor ~0.203
-    "turbo3":0.406,       # 3.25 bpv, scalar → factor ~0.203
+    "turbo3":    0.406,   # 3.25 bpv, scalar → factor ~0.203
     "turbo2_tcq":0.281,   # 2.25 bpv, TCQ → factor ~0.141
-    "turbo2":0.281,       # 2.25 bpv, scalar → factor ~0.141
+    "turbo2":    0.281,   # 2.25 bpv, scalar → factor ~0.141
 }
 CACHE_TYPE_K_DEFAULT = "turbo4"
 CACHE_TYPE_V_DEFAULT = "turbo3_tcq"
@@ -87,6 +124,7 @@ def _valid_cache_types() -> str:
     return ", ".join(sorted(CACHE_TYPE_BPE))
 
 
+# ── Plan dataclass (Task 3: to_dict for JSON output) ───────────────────────
 @dataclass
 class Plan:
     model: Path
@@ -112,6 +150,23 @@ class Plan:
     cache_type_v: str
     bpe_k: float
     bpe_v: float
+
+    def to_dict(self) -> dict:
+        return {
+            "model": str(self.model),
+            "ctx": self.ctx,
+            "fit_max_ctx": self.fit_max_ctx,
+            "rec_ctx": self.rec_ctx,
+            "vram_used_mib": round(self.vram_used_b / MIB, 2),
+            "vram_headroom_mib": round((self.vram_total_b - self.vram_used_b) / MIB, 2),
+            "cpu_expert_mib": round(self.cpu_expert_b / MIB, 2),
+            "gpu_experts": self.gpu_experts,
+            "cpu_experts": self.cpu_experts,
+            "cache_type_k": self.cache_type_k,
+            "cache_type_v": self.cache_type_v,
+            "n_cpu_moe": self.cpu_experts,
+            "fits": self.fits,
+        }
 
     @property
     def effective_factor(self) -> float:
@@ -140,30 +195,7 @@ class Plan:
         return self.cpu_experts
 
 
-def find_gguf_py(explicit: str | None) -> None:
-    if explicit:
-        p = Path(explicit).expanduser()
-        # Accept the gguf-py dir itself, the script path the old README
-        # documented (.../gguf-py/gguf/scripts/gguf_dump.py), or anything
-        # else inside the package — walk up looking for gguf/__init__.py.
-        for cand in (p, *p.parents):
-            if (cand / "gguf" / "__init__.py").is_file():
-                sys.path.insert(0, str(cand))
-                return
-            # Also try if cand is the llama.cpp root — gguf-py sits beside
-            # src/, models/, etc. as a sibling directory.
-            gguf_py = cand / "gguf-py"
-            if (gguf_py / "gguf" / "__init__.py").is_file():
-                sys.path.insert(0, str(gguf_py))
-                return
-        raise SystemExit(
-            f"--gguf-py-path does not point at a gguf-py package: {p}\n"
-            "Pass the gguf-py directory (e.g. .../llama.cpp/gguf-py) or any "
-            "path inside it."
-        )
-    _bootstrap_gguf_py()
-
-
+# ── KV geometry dataclass ───────────────────────────────────────────────────
 @dataclass
 class KVShape:
     """Per-architecture KV-cache geometry. Models with interleaved sliding-
@@ -222,14 +254,28 @@ def _validate_cache_type(name: str) -> str:
     """Validate a cache type name, raising SystemExit if invalid."""
     if name not in CACHE_TYPE_BPE:
         raise SystemExit(
-            f"Invalid cache type '{name}'. Valid types: { _valid_cache_types()}"
+            f"Invalid cache type '{name}'. Valid types: {_valid_cache_types()}"
         )
     return name
 
 
-def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> tuple[int, int, int, int, int, int, KVShape]:
-    """Return (layers, experts, active, dense_b, expert_b, model_max_ctx,
-    KVShape).
+# ── Named return for parse_metadata (Task 12: ParseResult) ─────────────────
+@dataclass(frozen=True)
+class ParseResult:
+    """Named return from parse_metadata()."""
+    layers: int
+    experts: int
+    active: int
+    dense_b: int
+    expert_b: int
+    model_max_ctx: int
+    kv_shape: "KVShape"
+
+
+# ── parse_metadata (Task 12: returns ParseResult) ──────────────────────────
+def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> ParseResult:
+    """Return a ParseResult with named fields for layers, experts, sizes,
+    and KVShape.
 
     Reads per-layer KV geometry straight from the GGUF so models with
     interleaved sliding-window attention (Gemma 3/4 etc.) are not
@@ -315,7 +361,15 @@ def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> tuple[i
         else:
             dense_b += int(t.n_bytes)
 
-    return (layers, experts, active, dense_b, expert_b, model_max_ctx, kv_shape)
+    return ParseResult(
+        layers=layers,
+        experts=experts,
+        active=active,
+        dense_b=dense_b,
+        expert_b=expert_b,
+        model_max_ctx=model_max_ctx,
+        kv_shape=kv_shape,
+    )
 
 
 def kv_bytes(ctx: int, kv_shape: KVShape) -> float:
@@ -337,9 +391,11 @@ def max_fit_ctx(kv_shape: KVShape, dense_b: float,
     return int(vram_for_kv_b // kv_shape.full_per_tok_b)
 
 
+# ── make_plan (with --verbose support, Task 10) ────────────────────────────
 def make_plan(model: Path, vram_mib: int, ram_mib: int,
               ctx: int | None,
-              cache_type_k: str, cache_type_v: str) -> "Plan":
+              cache_type_k: str, cache_type_v: str,
+              verbose: bool = False) -> "Plan":
     """Build a sizing Plan with this VRAM allocation precedence:
 
       1. **Dense backbone:** all non-expert tensors are placed on the GPU.
@@ -356,31 +412,41 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
     room, all experts go to RAM and the model pages experts from CPU on
     every routed token. The verdict surfaces this via `gpu_experts == 0`.
     """
-    (layers, experts, active, dense_b, expert_b, model_max_ctx,
-     kv_shape) = parse_metadata(model, cache_type_k, cache_type_v)
-    if experts <= 0:
+    result = parse_metadata(model, cache_type_k, cache_type_v)
+    if result.experts <= 0:
         raise ValueError("expert_count is 0 — this script targets MoE models only.")
 
-    per_expert_b = expert_b / experts
+    kv_shape = result.kv_shape
+    per_expert_b = result.expert_b / result.experts
+
+    if verbose:
+        print(f"  [verbose] model={model.name}", file=sys.stderr)
+        print(f"  [verbose] dense_b={result.dense_b}  expert_b={result.expert_b}", file=sys.stderr)
+        print(f"  [verbose] per_expert_b={per_expert_b}  layers={result.layers}", file=sys.stderr)
+        print(f"  [verbose] n_full_layers={kv_shape.n_full_layers}  n_swa_layers={kv_shape.n_swa_layers}", file=sys.stderr)
+        print(f"  [verbose] full_per_tok_b={kv_shape.full_per_tok_b}  swa_const_b={kv_shape.swa_const_b}", file=sys.stderr)
 
     # Step 2a: largest ctx that fits with just the dense backbone reserved.
-    fit_ctx_raw = max_fit_ctx(kv_shape, dense_b, vram_mib)
-    fit_max_ctx = align_ctx_down(min(model_max_ctx, max(0, fit_ctx_raw)))
+    fit_ctx_raw = max_fit_ctx(kv_shape, result.dense_b, vram_mib)
+    fit_max_ctx = align_ctx_down(min(result.model_max_ctx, max(0, fit_ctx_raw)))
+
+    if verbose:
+        print(f"  [verbose] fit_ctx_raw={fit_ctx_raw}  fit_max_ctx={fit_max_ctx}", file=sys.stderr)
 
     # Step 2b: cap the requested (or default) ctx by model_max and VRAM-fit.
-    requested_ctx = ctx if ctx is not None else model_max_ctx
-    chosen_ctx = align_ctx_down(min(requested_ctx, model_max_ctx, fit_ctx_raw))
+    requested_ctx = ctx if ctx is not None else result.model_max_ctx
+    chosen_ctx = align_ctx_down(min(requested_ctx, result.model_max_ctx, fit_ctx_raw))
     if ctx is not None and chosen_ctx < align_ctx_down(ctx):
         reasons = []
-        if requested_ctx > model_max_ctx:
-            reasons.append(f"model_max_ctx={model_max_ctx}")
+        if requested_ctx > result.model_max_ctx:
+            reasons.append(f"model_max_ctx={result.model_max_ctx}")
         if requested_ctx > fit_ctx_raw:
             reasons.append(f"VRAM-fit max={fit_max_ctx}")
         print(f"NOTE: {model.name}: requested --ctx {ctx} clamped to "
               f"{chosen_ctx} ({', '.join(reasons) or 'CTX_PAD alignment'}).",
               file=sys.stderr)
 
-    rec_ctx = align_ctx_down(min(model_max_ctx, max(1, fit_ctx_raw)))
+    rec_ctx = align_ctx_down(min(result.model_max_ctx, max(1, fit_ctx_raw)))
 
     kv_b = kv_bytes(chosen_ctx, kv_shape)
 
@@ -388,25 +454,30 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
     ram_budget_b = ram_mib * MIB
 
     # Step 3: fill remaining VRAM with experts.
-    vram_after_kv_b = vram_total_b - dense_b - kv_b
+    vram_after_kv_b = vram_total_b - result.dense_b - kv_b
     if vram_after_kv_b <= 0 or per_expert_b <= 0:
         gpu_experts = 0
     else:
-        gpu_experts = max(0, min(experts, int(vram_after_kv_b / per_expert_b)))
-    cpu_experts = experts - gpu_experts
+        gpu_experts = max(0, min(result.experts, int(vram_after_kv_b / per_expert_b)))
+    cpu_experts = result.experts - gpu_experts
 
     gpu_expert_b = gpu_experts * per_expert_b
     cpu_expert_b = cpu_experts * per_expert_b
-    vram_used_b = dense_b + kv_b + gpu_expert_b
+    vram_used_b = result.dense_b + kv_b + gpu_expert_b
+
+    if verbose:
+        print(f"  [verbose] chosen_ctx={chosen_ctx}  kv_b={kv_b}", file=sys.stderr)
+        print(f"  [verbose] vram_after_kv={vram_after_kv_b}  gpu_experts={gpu_experts}", file=sys.stderr)
+        print(f"  [verbose] vram_used_b={vram_used_b}", file=sys.stderr)
 
     return Plan(
-        model=model, layers=layers, experts=experts, active=active,
-        dense_b=dense_b, expert_b=expert_b, per_expert_b=per_expert_b,
+        model=model, layers=result.layers, experts=result.experts, active=result.active,
+        dense_b=result.dense_b, expert_b=result.expert_b, per_expert_b=per_expert_b,
         kv_b=kv_b, gpu_experts=gpu_experts, cpu_experts=cpu_experts,
         vram_used_b=vram_used_b, vram_total_b=vram_total_b,
         ram_budget_b=ram_budget_b, cpu_expert_b=cpu_expert_b,
         gpu_expert_b=gpu_expert_b, ctx=chosen_ctx,
-        model_max_ctx=model_max_ctx, fit_max_ctx=fit_max_ctx, rec_ctx=rec_ctx,
+        model_max_ctx=result.model_max_ctx, fit_max_ctx=fit_max_ctx, rec_ctx=rec_ctx,
         cache_type_k=cache_type_k, cache_type_v=cache_type_v,
         bpe_k=CACHE_TYPE_BPE[cache_type_k],
         bpe_v=CACHE_TYPE_BPE[cache_type_v],
@@ -473,11 +544,19 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
 
 
 def scan_dir(scan_path: Path, vram: int, ram: int,
-             ctx: int | None, quiet: bool,
-             cache_type_k: str, cache_type_v: str) -> int:
-    ggufs = sorted(scan_path.glob("*.gguf"))
-    if not ggufs:
-        raise SystemExit(f"No .gguf files found in {scan_path}")
+             ctx: int | None, quiet: bool, json_output: bool,
+             cache_type_k: str, cache_type_v: str,
+             models_file: Path | None = None) -> int:
+    if models_file is not None:
+        # Read explicit model list from file (one path per line)
+        ggufs = [Path(p.strip()) for p in models_file.read_text().strip().splitlines()
+                 if p.strip() and Path(p.strip()).exists()]
+        if not ggufs:
+            raise SystemExit(f"No valid models found in {models_file}")
+    else:
+        ggufs = sorted(scan_path.glob("*.gguf"))
+        if not ggufs:
+            raise SystemExit(f"No .gguf files found in {scan_path}")
 
     rows = []
     for g in ggufs:
@@ -506,8 +585,19 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
 
     if ctx is not None and best and best[1].ctx < ctx:
         print(f"NOTE: no model fits the VRAM budget at ctx={ctx}; "
-              f"best reaches {best[1].ctx}. Reduce --ctx or use a smaller quant.",
+              f"best reaches {best[1]}. Reduce --ctx or use a smaller quant.",
               file=sys.stderr)
+
+    # --json output: emit JSON array for callers (scan-all.sh, etc.)
+    if json_output:
+        plans = []
+        for g, p, err in rows:
+            if p is not None:
+                plans.append(p.to_dict())
+            else:
+                plans.append({"error": err})
+        print(json.dumps(plans, indent=2))
+        return 0
 
     if quiet:
         if not best:
@@ -573,34 +663,56 @@ def main() -> int:
                          "to stretch as far as VRAM allows.")
     ap.add_argument("--quiet", "-q", action="store_true",
                     help="Print only the recommended llama-server flags")
+    ap.add_argument("--json", action="store_true",
+                    help="Output plan as JSON (compatible with --quiet)")
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help="Print intermediate calculation steps (Task 10)")
     ap.add_argument("--gguf-py-path", default=None,
                     help="Path to the gguf-py directory inside an llama.cpp checkout (auto-detected if omitted)")
+    ap.add_argument("--models-file", default=None,
+                    help="Path to a file with one model path per line (overrides --scan glob, for --exclude filtering)")
     args = ap.parse_args()
 
     # Validate cache types
     cache_type_k = _validate_cache_type(args.cache_type_k)
     cache_type_v = _validate_cache_type(args.cache_type_v)
 
-    if not args.scan and not args.gguf:
-        ap.error("provide a gguf path or --scan DIR")
+    if not args.scan and not args.gguf and not args.models_file:
+        ap.error("provide a gguf path, --scan DIR, or --models-file PATH")
     if args.scan and args.gguf:
         ap.error("--scan and a positional gguf are mutually exclusive")
+    if args.models_file and args.gguf:
+        ap.error("--models-file and a positional gguf are mutually exclusive")
+    if args.models_file and args.scan:
+        ap.error("--models-file and --scan are mutually exclusive")
 
     find_gguf_py(args.gguf_py_path)
 
-    if args.scan:
-        scan_path = Path(args.scan).expanduser()
-        if not scan_path.is_dir():
-            raise SystemExit(f"--scan path is not a directory: {scan_path}")
+    if args.scan or args.models_file:
+        if args.models_file:
+            # models-file mode: scan_path is irrelevant, pass a dummy
+            scan_path = Path("/dev/null")
+        else:
+            scan_path = Path(args.scan).expanduser()
+            if not scan_path.is_dir():
+                raise SystemExit(f"--scan path is not a directory: {scan_path}")
+        models_file = Path(args.models_file).expanduser() if args.models_file else None
         return scan_dir(scan_path, args.vram, args.ram,
-                        args.ctx, args.quiet, cache_type_k, cache_type_v)
+                        args.ctx, args.quiet, args.json,
+                        cache_type_k, cache_type_v,
+                        models_file)
 
     model = Path(args.gguf).expanduser()
     if not model.is_file():
         raise SystemExit(f"Model not found: {model}")
 
     plan = make_plan(model, args.vram, args.ram,
-                     args.ctx, cache_type_k, cache_type_v)
+                     args.ctx, cache_type_k, cache_type_v,
+                     verbose=args.verbose)
+    if args.json:
+        print(json.dumps(plan.to_dict(), indent=2))
+        return 0 if plan.fits else 1
+
     if args.quiet:
         print(flag_line(plan))
         return 0 if plan.fits else 1

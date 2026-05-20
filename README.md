@@ -4,6 +4,22 @@ A workbench for running large **Mixture-of-Experts** LLMs locally on consumer ha
 
 Includes a sizing tool (`scripts/moe-configs.py`) that reads any GGUF, takes your VRAM/RAM as parameters, and prints the `--n-gpu-layers / --n-cpu-moe / -c` flags that fit.
 
+## Setup
+
+### Python virtual environment (optional but recommended)
+
+The sizing tool (`scripts/moe-configs.py`) has one dependency: `gguf-py`, which is also vendored inside the llama.cpp checkout (`llama.cpp/gguf-py`). The script auto-detects the vendored copy, so running it directly works out of the box.
+
+If you prefer an isolated venv:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Then run the tools as usual — they resolve `gguf-py` from the venv. You can also pass `--gguf-py-path` explicitly to override the auto-detection.
+
 ## How it works
 
 A 35B MoE has only ~3B parameters active per token (8 of 256 experts on Qwen3.6-35B-A3B). The other ~31B can sit cold in slow memory at no per-token cost — provided we can route the active 8 into compute quickly.

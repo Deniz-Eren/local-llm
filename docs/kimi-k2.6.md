@@ -10,6 +10,27 @@ Kimi K2.6 is a sparse MoE model much larger than the Qwen3.6 family. We are prof
 | **RAM** | 740 GB | DDR4 ECC (test server) |
 | **GPU** | NVIDIA TU104-895-A1 (T4) | 16 GB GDDR6 (16384 MiB), 4096 CUDA cores, Tensor Cores ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf)) |
 
+## Final Run Command Used
+
+Worked but unusable at 1-2 tokens/s and small context of 50k:
+```bash
+llama-server -m Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf \
+    --n-gpu-layers 999 \
+    --n-cpu-moe 384 \
+    -ctk q4_0 \
+    -ctv turbo3_tcq \
+    -c 49920 \
+    -b 512 -ub 512 \
+    -fa on \
+    --fit off \
+    -np 1 \
+    --host 0.0.0.0 --port 8080 \
+    --no-warmup \
+    --alias "Kimi-K2.6" \
+    --threads 8 \
+    --no-mmap --mlock
+```
+
 ## Model
 
 We are testing with the **UD-Q4_K_XL** quant from Unsloth — 14 shards totalling ~544 GiB on disk, merged to a single `Kimi-K2.6-UD-Q4_K_XL.gguf` (~544 GiB).

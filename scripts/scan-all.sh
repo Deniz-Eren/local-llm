@@ -2,69 +2,50 @@
 # Copyright (c) 2026 Deniz Eren
 # Licensed under the MIT License. See the LICENSE file at the repository
 # root for the full license text.
-# scan-all.sh — scan all GGUFs in a directory across multiple KV cache
-# configurations and output a combined table.
-#
-# Usage:
-#   ./scripts/scan-all.sh <models-dir> [OPTIONS]
-#
-# The default scan uses the standard asymmetric KV pair
-# (turbo4/turbo3_tcq) at the default context. Pass --configs to scan
-# multiple KV configurations.
+# scan-all.sh — scan all GGUFs across multiple KV cache configurations.
 
 set -euo pipefail
 
-# ── defaults ────────────────────────────────────────────────────────────────
 SCAN_DIR=""
 VRAM=6144
 RAM=32768
 CTX=128000
 MOE_CONFIGS=""
 GGUF_PY_PATH=""
-OUTPUT_FORMAT="markdown"  # markdown | csv
+OUTPUT_FORMAT="markdown"
+EXCLUDE=""
 
-# KV configs to scan (name -> "K V")
+# Python interpreter: prefer venv, fall back to system python3.
+if [[ -f "$(cd "$(dirname "$0")/.." && pwd)/.venv/bin/python3" ]]; then
+  PYTHON="$(cd "$(dirname "$0")/.." && pwd)/.venv/bin/python3"
+else
+  PYTHON="${PYTHON:-python3}"
+fi
+
 DEFAULT_CONFIGS=("turbo4/turbo3_tcq" "turbo3_tcq/turbo3_tcq" "turbo4/turbo4" "turbo3_tcq/turbo2_tcq")
 CONFIGS=("${DEFAULT_CONFIGS[@]}")
 
-# ── helpers ─────────────────────────────────────────────────────────────────
 usage() {
   cat <<EOF
 Usage: $(basename "$0") <models-dir> [OPTIONS]
 
-Scan all .gguf files in <models-dir> across multiple KV cache configurations
-and print a combined table.
-
-Required:
-  models-dir              Directory containing .gguf files
+Scan all .gguf files across multiple KV cache configurations.
 
 Options:
   --vram MIB              Total VRAM in MiB (default: 6144)
   --ram MIB               RAM budget in MiB (default: 32768)
   --ctx N                 Context length (default: 128000)
   --configs CONFIGS       Comma-separated KV config names to scan
-                          (default: turbo4/turbo3_tcq,turbo3_tcq/turbo3_tcq,turbo4/turbo4,turbo3_tcq/turbo2_tcq)
+  --exclude PATTERN       Glob pattern of model names to skip (e.g. "*.Q8_0*")
   --format fmt            Output format: markdown | csv (default: markdown)
   --moe-configs PATH      Path to moe-configs.py (default: alongside this script)
   --gguf-py-path PATH     Path to gguf-py directory
   --quiet                 Only print fitting models
   --help, -h              Show this help
-
-Examples:
-  # Scan with default asymmetric KV at 128K context
-  ./scripts/scan-all.sh ~/models
-
-  # Scan multiple KV configs, 16 GiB VRAM
-  ./scripts/scan-all.sh ~/models --vram 16384 \\
-      --configs "turbo4/turbo3_tcq,turbo4/turbo4,turbo3_tcq/turbo2_tcq"
-
-  # CSV output for spreadsheet import
-  ./scripts/scan-all.sh ~/models --format csv
 EOF
   exit 1
 }
 
-# ── parse args ──────────────────────────────────────────────────────────────
 if [[ $# -lt 1 ]] || [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
   usage
 fi
@@ -77,8 +58,9 @@ while [[ $# -gt 0 ]]; do
     --ram)            RAM="$2";     shift 2 ;;
     --ctx)            CTX="$2";     shift 2 ;;
     --configs)        IFS=',' read -ra CONFIGS <<< "$2"; shift 2 ;;
+    --exclude)        EXCLUDE="$2"; shift 2 ;;
     --format)         OUTPUT_FORMAT="$2"; shift 2 ;;
-    --moe-configs)      MOE_CONFIGS="$2";  shift 2 ;;
+    --moe-configs)    MOE_CONFIGS="$2";  shift 2 ;;
     --gguf-py-path)   GGUF_PY_PATH="$2"; shift 2 ;;
     --quiet)          QUIET=true;   shift ;;
     *)                echo "Unknown option: $1"; usage ;;
@@ -87,107 +69,114 @@ done
 
 [[ -d "$SCAN_DIR" ]] || { echo "Error: $SCAN_DIR is not a directory"; exit 1; }
 
-# ── run moe-configs.py for each config ──────────────────────────────────────
-# Resolve moe-configs.py path: explicit flag > script directory
+# ── resolve moe-configs.py ─────────────────────────────────────────────────
 if [[ -n "$MOE_CONFIGS" ]]; then
   MOE_CONFIGS="$(cd "$(dirname "$MOE_CONFIGS")" && pwd)/$(basename "$MOE_CONFIGS")"
 else
   MOE_CONFIGS="$(cd "$(dirname "$0")" && pwd)/moe-configs.py"
 fi
 
-PYTHON_ARGS=(
-  python3 "$MOE_CONFIGS"
-  --scan "$SCAN_DIR"
-  --vram "$VRAM"
-  --ram "$RAM"
-  --ctx "$CTX"
-)
-
-[[ -n "$GGUF_PY_PATH" ]] && PYTHON_ARGS+=(--gguf-py-path "$GGUF_PY_PATH")
-
-# Collect results into temp files
+# ── temp dir ────────────────────────────────────────────────────────────────
 TMPDIR_SCAN=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_SCAN"' EXIT
 
+# ── filter GGUFs ────────────────────────────────────────────────────────────
+FILTERED_LIST="${TMPDIR_SCAN}/filtered.txt"
+for gguf in "$SCAN_DIR"/*.gguf; do
+  [[ -f "$gguf" ]] || continue
+  if [[ -n "$EXCLUDE" ]]; then
+    base=$(basename "$gguf")
+    # shellcheck disable=SC2254
+    case "$base" in
+      $EXCLUDE) continue ;;
+    esac
+  fi
+  echo "$gguf"
+done > "$FILTERED_LIST"
+
+if [[ ! -s "$FILTERED_LIST" ]]; then
+  echo "No .gguf files found in $SCAN_DIR" >&2
+  exit 1
+fi
+
+# ── scan each KV config (sequential — background jobs produce truncated output) ──
 for config in "${CONFIGS[@]}"; do
   IFS='/' read -r k v <<< "$config"
   echo "Scanning: ${config} (K=$k, V=$v, ctx=$CTX, vram=${VRAM} MiB, ram=${RAM} MiB)"
 
-  set +e
-  OUTPUT=$("${PYTHON_ARGS[@]}" --cache-type-k "$k" --cache-type-v "$v" 2>&1)
-  EXIT_CODE=$?
-  set -e
-  echo "$OUTPUT" > "${TMPDIR_SCAN}/${config//\//_}.txt"
+  outfile="${TMPDIR_SCAN}/${config//\//_}.json"
 
-  if [[ $EXIT_CODE -ne 0 ]]; then
-    echo "ERROR: moe-configs.py failed for config $config (exit $EXIT_CODE)" >&2
-    echo "$OUTPUT" >&2
+  # Use moe-configs.py --scan --json for structured output (Task 3 cascade)
+  # Sequential execution avoids background-job truncation bug
+  # When --exclude is set, pass filtered model list via --models-file
+  if [[ -n "$EXCLUDE" ]]; then
+    "${PYTHON}" "$MOE_CONFIGS" --models-file "$FILTERED_LIST" \
+      --vram "$VRAM" --ram "$RAM" \
+      --ctx "$CTX" \
+      --cache-type-k "$k" --cache-type-v "$v" \
+      --json >"$outfile" 2>"${outfile}.err"
+  else
+    "${PYTHON}" "$MOE_CONFIGS" --scan "$SCAN_DIR" \
+      --vram "$VRAM" --ram "$RAM" \
+      --ctx "$CTX" \
+      --cache-type-k "$k" --cache-type-v "$v" \
+      --json >"$outfile" 2>"${outfile}.err"
+  fi
+
+  # Check that output was actually written
+  if [[ ! -s "$outfile" ]]; then
+    echo "ERROR: moe-configs.py produced no output for config $config" >&2
+    cat "${outfile}.err" >&2
+    exit 1
+  fi
+
+  # Validate JSON
+  if ! jq empty "$outfile" 2>/dev/null; then
+    echo "ERROR: invalid JSON output for config $config" >&2
+    head -5 "$outfile" >&2
+    cat "${outfile}.err" >&2
     exit 1
   fi
 done
 
 # ── parse and combine ──────────────────────────────────────────────────────
-# Parse the moe-configs.py scan output into a structured format.
-# Each scan file has lines like:
-#   MODEL_NAME     CTX  MAX  VRAM MiB  RAM MiB  GPU/CPU  FIT  FLAG...
-# We extract: config, model, ctx, max_ctx, vram_mib, ram_mib, gpu_cpu, fit
-parse_scan_file() {
-  local file="$1"
-  local config_name="$2"
-  while IFS= read -r line; do
-    # Skip header / dash / note lines, empty lines
-    [[ "$line" =~ ^Scanning ]] && continue
-    [[ "$line" =~ ^MODEL ]] && continue
-    [[ "$line" =~ ^--- ]] && continue
-    [[ "$line" =~ ^NOTE: ]] && continue
-    [[ "$line" =~ ^$ ]] && continue
-
-    # Skip error lines (contain "ERR" before any digit)
-    [[ "$line" =~ "ERR" ]] && continue
-
-    # Must start with a filename (contains ".gguf")
-    [[ "$line" =~ \.gguf ]] || continue
-
-    # Extract fields via regex: the scan format is:
-    #   <name>.gguf  <ctx>  <max>  <vram> MiB  <ram> MiB  <gpu/cpu>  <fit>  ...
-    # Use .* to match model names containing dots (e.g., Qwen3.6-...).
-    if [[ "$line" =~ ([A-Za-z0-9_.-]+\.gguf)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+MiB[[:space:]]+([0-9]+)[[:space:]]+MiB[[:space:]]+([0-9]+/[0-9]+)[[:space:]]+([A-Za-z]+) ]]; then
-      local model="${BASH_REMATCH[1]}"
-      local ctx="${BASH_REMATCH[2]}"
-      local max_ctx="${BASH_REMATCH[3]}"
-      local vram_mib="${BASH_REMATCH[4]}"
-      local ram_mib="${BASH_REMATCH[5]}"
-      local gpu_cpu="${BASH_REMATCH[6]}"
-      local fit="${BASH_REMATCH[7]}"
-      echo "${config_name}|${model}|${ctx}|${max_ctx}|${vram_mib}|${ram_mib}|${gpu_cpu}|${fit}"
-    fi
-  done < "$file"
-}
-
-# Build combined results
 declare -A RESULTS
 ALL_MODELS=()
 
 for config in "${CONFIGS[@]}"; do
   IFS='/' read -r k v <<< "$config"
   config_short="${k}_${v}"
-  file="${TMPDIR_SCAN}/${config_short}.txt"
+  json_file="${TMPDIR_SCAN}/${config_short}.json"
 
-  if [[ ! -f "$file" ]]; then
+  if [[ ! -f "$json_file" ]]; then
     echo "Warning: no output for config $config" >&2
     continue
   fi
 
-  while IFS='|' read -r _config model ctx max_ctx vram_mib ram_mib gpu_cpu fit; do
-    # Skip error entries
-    [[ "$fit" == "ERR" ]] && continue
+  # Parse JSON array with jq — extract fields for each model
+  while IFS=$'\t' read -r model ctx max_ctx vram_mib ram_mib gpu_cpu fit; do
+    [[ -z "$model" ]] && continue
 
-    if [[ ! " ${ALL_MODELS[*]:-} " =~ " ${model} " ]]; then
+    # Add to ALL_MODELS only if new (Task 5: safe init with set -u)
+    if [[ ${#ALL_MODELS[@]} -eq 0 ]] || [[ ! " ${ALL_MODELS[*]} " =~ " ${model} " ]]; then
       ALL_MODELS+=("$model")
     fi
 
     RESULTS["${model}|${config_short}"]="${ctx}|${max_ctx}|${vram_mib}|${ram_mib}|${gpu_cpu}|${fit}"
-  done < <(parse_scan_file "$file" "$config")
+  done < <(
+    jq -r '.[] |
+      if .error then empty
+      else
+        [( .model | split("/") | last),
+         .ctx,
+         .fit_max_ctx,
+         (.vram_used_mib | tostring),
+         (.cpu_expert_mib | tostring),
+         ((.gpu_experts | tostring) + "/" + (.cpu_experts | tostring)),
+         (if .fits then "OK" else "vram" end)] |
+        join("\t")
+      end' "$json_file" 2>/dev/null
+  )
 done
 
 # ── output ──────────────────────────────────────────────────────────────────

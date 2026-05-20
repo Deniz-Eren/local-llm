@@ -8,18 +8,18 @@ Improvements for the three scripts in `scripts/`, ordered by priority.
 
 | # | Script | Type | Effort | Impact | Status |
 |---|--------|------|--------|--------|--------|
-| 1 | `run-server.sh` | **Bug** | 1 min | High | ⬜ Open |
-| 2 | `run-server.sh` | Feature | 10 min | High | ⬜ Open |
-| 3 | `moe-configs.py` | Feature | 15 min | High | ⬜ Open |
-| 4 | `scan-all.sh` | Perf | 5 min | Medium | ⬜ Open |
-| 5 | `scan-all.sh` | Robustness | 1 min | Medium | ⬜ Open |
-| 6 | `scan-all.sh` | Feature | 5 min | Medium | ⬜ Open |
-| 7 | `run-server.sh` | Feature | 1 min | Low | ⬜ Open |
-| 8 | `run-server.sh` | Feature | 2 min | Low | ⬜ Open |
-| 9 | `run-server.sh` | Robustness | 2 min | Low | ⬜ Open |
-| 10 | `moe-configs.py` | Feature | 5 min | Low | ⬜ Open |
-| 11 | `moe-configs.py` | Cleanup | 5 min | Low | ⬜ Open |
-| 12 | `moe-configs.py` | Cleanup | 3 min | Low | ⬜ Open |
+| 1 | `run-server.sh` | **Bug** | 1 min | High | ✅ Done |
+| 2 | `run-server.sh` | Feature | 10 min | High | ✅ Done |
+| 3 | `moe-configs.py` | Feature | 15 min | High | ✅ Done |
+| 4 | `scan-all.sh` | Perf | 5 min | Medium | ✅ Done |
+| 5 | `scan-all.sh` | Robustness | 1 min | Medium | ✅ Done |
+| 6 | `scan-all.sh` | Feature | 5 min | Medium | ✅ Done |
+| 7 | `run-server.sh` | Feature | 1 min | Low | ✅ Done |
+| 8 | `run-server.sh` | Feature | 2 min | Low | ✅ Done |
+| 9 | `run-server.sh` | Robustness | 2 min | Low | ✅ Done |
+| 10 | `moe-configs.py` | Feature | 5 min | Low | ✅ Done |
+| 11 | `moe-configs.py` | Cleanup | 5 min | Low | ✅ Done |
+| 12 | `moe-configs.py` | Cleanup | 3 min | Low | ✅ Done |
 
 ---
 
@@ -168,7 +168,9 @@ done
 ```
 
 **Effort:** 5 minutes
-**Status:** ⬜ Open
+**Status:** ✅ Done
+
+**Note:** Implemented as sequential execution instead of parallel. Background jobs (`&`) produce truncated JSON output (~2.7KB vs ~5.1KB) in this environment due to stdout buffer issues with concurrent `moe-configs.py` processes. Sequential is the only reliable approach. Full 4-config × 13-model scan takes ~7 min due to gguf-py import overhead per Python process (each config invocation re-imports gguf-py from scratch).
 
 ### 5. `scan-all.sh`: `ALL_MODELS` array init safety with `set -u`
 
@@ -185,7 +187,7 @@ if [[ ${#ALL_MODELS[@]} -eq 0 ]] || [[ ! " ${ALL_MODELS[*]} " =~ " ${model} " ]]
 ```
 
 **Effort:** 1 minute
-**Status:** ⬜ Open
+**Status:** ✅ Done
 
 ### 6. `scan-all.sh`: Add `--exclude` support
 
@@ -194,7 +196,7 @@ if [[ ${#ALL_MODELS[@]} -eq 0 ]] || [[ ! " ${ALL_MODELS[*]} " =~ " ${model} " ]]
 Add support for an `--exclude` flag using a glob pattern (e.g., `--exclude "*.Q8_0*"`) to skip certain models during a scan.
 
 **Effort:** 5 minutes
-**Status:** ⬜ Open
+**Status:** ✅ Done
 
 ---
 
