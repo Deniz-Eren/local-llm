@@ -21,6 +21,7 @@ run-server.sh --model Qwen3.6-35B-A3B-Q8_0.gguf --n-cpu-moe 256 -c 262144 -ctk q
 
 ## Model
 
+```
 Model:            Qwen3.6-35B-A3B-Q8_0.gguf
 Layers:           40
 Experts (total):  256  (active per token: 8)
@@ -51,3 +52,4 @@ Context:          262144  (model max: 262144, VRAM-fit max: 262144)
 
 === llama-server flag ===
   --n-gpu-layers 999 --n-cpu-moe 231 -c 262144 -ctk q8_0 -ctv q8_0
+```
