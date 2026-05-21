@@ -29,6 +29,7 @@ FIT="off"
 NP=1
 SPEC_TYPE=""
 SPEC_DRAFT_N_MAX=""
+NO_SPEC_TYPE=""
 NO_MMAP=""
 MLOCK=""
 DRY_RUN=false
@@ -69,6 +70,8 @@ Options:
                           Omit to skip speculative decoding entirely.
   --spec-draft-n-max N    Draft tokens per speculative step
                           (default: 3; requires --spec-type).
+  --no-spec-type          Disable speculative decoding even if model has MTP
+                          weights. Useful when MTP causes instability.
   --flash-attn on|off     Flash attention (default: on).
 
 Examples:
@@ -122,6 +125,7 @@ while [[ $# -gt 0 ]]; do
     --flash-attn)       FA="$2";          shift 2 ;;
     --spec-type)        SPEC_TYPE="$2";    shift 2 ;;
     --spec-draft-n-max) SPEC_DRAFT_N_MAX="$2"; shift 2 ;;
+    --no-spec-type)     NO_SPEC_TYPE=1;    shift ;;
     --quiet)            QUIET=1;           shift ;;
     --dry-run)          DRY_RUN=true;      shift ;;
     --no-mmap)          NO_MMAP=1;         shift ;;
@@ -236,8 +240,48 @@ CMD=(
   --port "$PORT"
 )
 # Speculative decoding (MTP / draft tokens)
-[[ -n "$SPEC_TYPE" ]]    && CMD+=(--spec-type "$SPEC_TYPE")
-[[ -n "$SPEC_DRAFT_N_MAX" ]] && CMD+=(--spec-draft-n-max "$SPEC_DRAFT_N_MAX")
+# Task 22: detect missing MTP weights and warn
+if [[ -n "$SPEC_TYPE" ]]; then
+  # Check if model has MTP tensors
+  if command -v python3 &>/dev/null; then
+    _HAS_MTP=$(python3 -c "
+import sys
+try:
+    from gguf import GGUFReader
+    r = GGUFReader('$MODEL')
+    has_mtp = any('mtp_' in t.name or '_mtp' in t.name for t in r.tensors)
+    print('yes' if has_mtp else 'no')
+except Exception as e:
+    print(f'error: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>/dev/null) || _HAS_MTP="error"
+    if [[ "$_HAS_MTP" == "no" ]]; then
+      echo "⚠ Model does not have MTP weights; --spec-type $SPEC_TYPE will be ignored"
+    elif [[ "$_HAS_MTP" == "error" ]]; then
+      echo "⚠ Could not verify MTP weights; proceeding with --spec-type $SPEC_TYPE"
+    fi
+  fi
+  CMD+=(--spec-type "$SPEC_TYPE")
+  [[ -n "$SPEC_DRAFT_N_MAX" ]] && CMD+=(--spec-draft-n-max "$SPEC_DRAFT_N_MAX")
+elif [[ -z "$NO_SPEC_TYPE" ]]; then
+  # Auto-detect MTP and enable speculative decoding if available
+  if command -v python3 &>/dev/null; then
+    _HAS_MTP=$(python3 -c "
+import sys
+try:
+    from gguf import GGUFReader
+    r = GGUFReader('$MODEL')
+    has_mtp = any('mtp_' in t.name or '_mtp' in t.name for t in r.tensors)
+    print('yes' if has_mtp else 'no')
+except:
+    print('no')
+" 2>/dev/null) || _HAS_MTP="no"
+    if [[ "$_HAS_MTP" == "yes" ]]; then
+      echo "ℹ MTP weights detected; enabling speculative decoding (use --no-spec-type to disable)"
+      CMD+=(--spec-type draft-mtp --spec-draft-n-max 3)
+    fi
+  fi
+fi
 
 # Optional flags
 [[ -n "$ALIAS" ]]     && CMD+=(--alias "$ALIAS")

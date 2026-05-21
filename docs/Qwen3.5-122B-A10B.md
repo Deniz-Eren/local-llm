@@ -16,7 +16,7 @@ These flags use `--spec-type` and `--spec-draft-n-max` as script options (now co
 
 Stable at 10 tokens/s, good token context +200k.
 ```bash
-run-server.sh --model Qwen3.5-122B-A10B-Q8_0/Qwen3.5-122B-A10B-Q8_0-00001-of-00004.gguf --n-cpu-moe 256 -c 201472 -ctk q8_0 -ctv q8_0 --alias "Qwen3.5-122B-A10B-Q8_0" --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
+run-server.sh --model Qwen3.5-122B-A10B-Q8_0/Qwen3.5-122B-A10B-Q8_0-00001-of-00004.gguf --n-cpu-moe 64 -c 201472 -ctk q8_0 -ctv q8_0 --alias "Qwen3.5-122B-A10B-Q8_0" --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
 ```
 
 ## Model

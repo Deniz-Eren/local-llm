@@ -212,6 +212,22 @@ if [[ "$OUTPUT_FORMAT" == "csv" ]]; then
       fi
     done
   done
+  # Task 24: summary for CSV (to stderr so it doesn't break parsing)
+  total_count=0
+  fit_count=0
+  for model in "${ALL_MODELS[@]}"; do
+    for config in "${CONFIGS[@]}"; do
+      IFS='/' read -r k v <<< "$config"
+      config_short="${k}_${v}"
+      result="${RESULTS["${model}|${config_short}"]:-}"
+      if [[ -n "$result" ]]; then
+        ((total_count++))
+        IFS='|' read -r _ _ _ _ _ _ fit <<< "$result"
+        [[ "$fit" == "OK" ]] && ((fit_count++))
+      fi
+    done
+  done
+  echo "# Summary: ${#ALL_MODELS[@]} models, ${total_count} configs, ${fit_count} fitting" >&2
 elif [[ "$OUTPUT_FORMAT" == "markdown" ]]; then
   # Markdown table
   echo '| Model | Config | `ctx` | `max_ctx` | VRAM used | RAM used | GPU/CPU | FIT | Extra Flags |'
@@ -232,4 +248,30 @@ elif [[ "$OUTPUT_FORMAT" == "markdown" ]]; then
       fi
     done
   done
+  # Task 24: summary aggregation
+  echo ""
+  echo "### Summary"
+  total_count=0
+  fit_count=0
+  non_fit_count=0
+  for model in "${ALL_MODELS[@]}"; do
+    for config in "${CONFIGS[@]}"; do
+      IFS='/' read -r k v <<< "$config"
+      config_short="${k}_${v}"
+      result="${RESULTS["${model}|${config_short}"]:-}"
+      if [[ -n "$result" ]]; then
+        ((total_count++))
+        IFS='|' read -r _ _ _ _ _ _ fit <<< "$result"
+        if [[ "$fit" == "OK" ]]; then
+          ((fit_count++))
+        else
+          ((non_fit_count++))
+        fi
+      fi
+    done
+  done
+  echo "- **Total models scanned:** ${#ALL_MODELS[@]}"
+  echo "- **Total config/model combinations:** ${total_count}"
+  echo "- **Fitting:** ${fit_count}"
+  echo "- **Not fitting:** ${non_fit_count}"
 fi

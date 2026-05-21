@@ -126,6 +126,24 @@ lscpu | grep -i avx
 
 Then enable the matching cmake options:
 
+### `--check-avx` — runtime CPU diagnostic
+
+The sizing tool includes `--check-avx` to report which AVX-512 extensions are available at runtime:
+
+```bash
+./scripts/moe-configs.py --check-avx
+```
+
+Output example:
+```
+AVX-512F:    NOT detected
+AVX-512VNNI: NOT detected
+AVX2:        detected
+AVX-VNNI:    detected
+```
+
+This is useful when your build uses `-DGGML_AVX512=ON` but your CPU doesn't support AVX-512F — `ggml` will fall back to AVX2 at runtime, and the diagnostic confirms which code paths are actually available. Note that CPU virtualization can mask extensions (the i7-13850HX host lacks AVX-512F, but a VM may simulate a Xeon Gold 5120 that advertises it).
+
 | Extension | cmake flag | First microarch | What it speeds up |
 |-----------|-----------|-----------------|-------------------|
 | AVX-512F (base) | `GGML_AVX512=ON` | Skylake | Base 512-bit GEMM — without it, falls back to AVX2 |
@@ -279,6 +297,37 @@ The repo includes `scripts/run-server.sh` to launch the server with MoE expert r
     --threads 8 --alias qwen3.6
 ```
 
+### `--dry-run` — compose commands without launching
+
+Preview the composed `llama-server` command without actually starting it. Useful for CI, debugging, or copying commands into different terminals:
+
+```bash
+# See what flags would be used
+./scripts/run-server.sh --model ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf --dry-run
+
+# With explicit overrides
+./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
+    --ctx 200000 --n-cpu-moe 200 --dry-run
+```
+
+The script validates the model path and runs `moe-configs.py` for sizing, but skips binary validation and server launch. Exit code is 0 if sizing succeeds, 1 if the model doesn't fit the budget.
+
+### `--mlock-safe` — auto-guard against OOM
+
+The `--mlock-safe` flag (enabled by default) automatically disables `--mlock` when the sizing plan shows the model doesn't fit in the RAM budget. Without this guard, `--mlock` would cause an OOM kill under memory pressure.
+
+To force `--mlock` regardless of fit status, use `--mlock` without `--mlock-safe`:
+
+```bash
+# Safe mode (default) — --mlock removed if fits: false
+./scripts/run-server.sh --model ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf --mlock-safe
+
+# Force --mlock (risky if RAM budget is tight)
+./scripts/run-server.sh --model ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf --mlock
+```
+
+The guard works by parsing `moe-configs.py --json` output and checking the `fits` field. If `fits: false`, `--mlock` is silently dropped from the command.
+
 See `./scripts/run-server.sh --help` for all options.
 
 ## Empirically working command
@@ -349,6 +398,15 @@ Pinning helps too: `taskset -c 0-7 ./llama-server ...` (or the P-core CPU-list f
 ## K/V cache types (`--cache-type-k / --cache-type-v`)
 
 The script's default KV pair is **`turbo4` for keys** and **`turbo3_tcq` for values** (`--cache-type-k turbo4 --cache-type-v turbo3_tcq`). Keys are lossless (4.25 bpv) while values use 3.25 bpv TCQ — this asymmetric pairing gives lossless KV for the attention numerator while keeping values ~5× compressed.
+
+### When to override the defaults
+
+| Situation | Recommended override | Reason |
+|-----------|---------------------|--------|
+| **Maximum VRAM headroom** | `-ctk turbo3_tcq -ctv turbo2_tcq` | ~30% smaller KV, stretches context further |
+| **Quality-critical long context** | `-ctk turbo4 -ctv turbo4` | Lossless K+V, ~31% larger than default |
+| **CUDA fallback (no TCQ)** | `-ctk q8_0 -ctv q8_0` | Plain 8-bit quant, ~2× compression |
+| **Testing / debugging** | `-ctk f16 -ctv f16` | Baseline FP16, no compression |
 
 All supported types with their relative costs:
 

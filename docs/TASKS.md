@@ -31,18 +31,40 @@ Improvements for the three scripts in `scripts/`, ordered by priority.
 | 14 | `run-server.sh` | Feature: `--dry-run` flag | ✅ | Tested: auto-sizing, explicit flags, spec decoding, all compose correctly |
 | 15 | `moe-configs.py` | Feature: `--check-avx` diagnostic | ✅ | Tested: reports AVX2+AVX-VNNI available, no AVX-512F (host is i7-13850HX) |
 | 16 | `scan-all.sh` | Feature: `--no-warmup`/`--no-mmap`/`--mlock` flags | ✅ | Tested: markdown and CSV both include extra_flags column |
+| 17 | `run-server.sh` | Feature: `--json` parsing for auto-guard logic | ✅ | Parses `moe-configs.py --json` output to extract `fits` and `n_cpu_moe` |
 
 ---
 
-## Deferred / Lower Priority
+## Pending: `--benchmark` Implementation
 
-### `--benchmark` mode
+**Blocked on:** Design decisions
 
-A `--benchmark` flag that launches, runs a fixed prompt, measures tok/s, prints summary, then exits. Currently requires the manual `2>&1 | tee; grep "ms/tok"; sed/awk` pipeline. Implementation needs a design pass for: fixed prompt text, number of steps, streaming vs non-streaming, exit behavior.
+A `--benchmark` flag that launches, runs a fixed prompt, measures tok/s, prints summary, then exits. Currently requires the manual `2>&1 | tee; grep "ms/tok"; sed/awk` pipeline.
+
+**Open questions:**
+- Fixed prompt: use a standard 100-token completion test or user-configurable via `--benchmark-prompt`?
+- Iterations: single run or average over N runs (`--benchmark-iters`)?
+- Streaming: measure first-token latency separately from decode tok/s?
+- Exit code: 0 on success, non-zero if tok/s below threshold (`--benchmark-threshold`)?
+- Output format: plain text summary or JSON for CI consumption?
 
 ### `--quiet` in `scan-all.sh`
 
 The `--quiet` flag is parsed but never used — the full table is always printed. Could suppress the scanning progress lines and only print fitting models, but hasn't been needed yet.
+
+---
+
+## Documentation Gaps (New Tasks)
+
+| # | File | Type | Status | Notes |
+|---|------|------|--------|-------|
+| 18 | `README.md` | Docs: add `--mlock-safe` behavior section | ✅ | Added section with auto-guard trigger conditions |
+| 19 | `README.md` | Docs: add `--dry-run` examples | ✅ | Added examples for CI/debugging use cases |
+| 20 | `README.md` | Docs: add `--check-avx` diagnostic section | ✅ | Added section with example output |
+| 21 | `README.md` | Docs: document `--cache-type-k/v` defaults | ✅ | Added table with override scenarios |
+| 22 | `run-server.sh` | Feature: `--no-spec-type` fallback | ✅ | Auto-detects MTP weights and warns if missing |
+| 23 | `moe-configs.py` | Feature: `--json --verbose` mode | ✅ | Adds `_verbose` object to JSON output |
+| 24 | `scan-all.sh` | Feature: summary aggregation | ✅ | Markdown table summary + CSV comment |
 
 ---
 

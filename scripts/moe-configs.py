@@ -151,8 +151,8 @@ class Plan:
     bpe_k: float
     bpe_v: float
 
-    def to_dict(self) -> dict:
-        return {
+    def to_dict(self, verbose: bool = False) -> dict:
+        result = {
             "model": str(self.model),
             "ctx": self.ctx,
             "fit_max_ctx": self.fit_max_ctx,
@@ -167,6 +167,16 @@ class Plan:
             "n_cpu_moe": self.cpu_experts,
             "fits": self.fits,
         }
+        # Task 23: add verbose fields when requested
+        if verbose:
+            result["_verbose"] = {
+                "dense_b_mib": round(self.dense_b / MIB, 2),
+                "expert_b_mib": round(self.expert_b / MIB, 2),
+                "per_expert_b_mib": round(self.per_expert_b / MIB, 2),
+                "kv_b_mib": round(self.kv_b / MIB, 2),
+                "effective_factor": round(self.effective_factor, 3),
+            }
+        return result
 
     @property
     def effective_factor(self) -> float:
@@ -764,7 +774,8 @@ def main() -> int:
                      args.ctx, cache_type_k, cache_type_v,
                      verbose=args.verbose)
     if args.json:
-        print(json.dumps(plan.to_dict(), indent=2))
+        # Task 23: --json --verbose outputs JSON to stdout, verbose info to stderr
+        print(json.dumps(plan.to_dict(verbose=args.verbose), indent=2))
         return 0 if plan.fits else 1
 
     if args.quiet:
