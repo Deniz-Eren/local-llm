@@ -324,6 +324,21 @@ def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> ParseRe
     key_len = field_uint("attention.key_length")
     val_len = field_uint("attention.value_length")
 
+    # Full attention interval (some models only maintain KV cache for every Nth layer)
+    # Field name varies by model architecture:
+    #   - "qwen35moe.full_attention_interval" for Qwen3.5/3.6 MoE
+    #   - "qwen3moe.full_attention_interval" for Qwen3 MoE
+    #   - "attention.full_attention_interval" for other models
+    full_attn_interval = None
+    for suffix in ("qwen35moe.full_attention_interval",
+                   "qwen3moe.full_attention_interval",
+                   "attention.full_attention_interval"):
+        full_attn_interval = field_uint(suffix, default=None)
+        if full_attn_interval is not None:
+            break
+    if full_attn_interval is None or full_attn_interval < 1:
+        full_attn_interval = 1
+
     # SWA geometry. Models without SWA have no swa_layers array and no
     # sliding_window key, in which case all layers are treated as full.
     key_len_swa = field_uint("attention.key_length_swa", default=key_len)
@@ -350,8 +365,12 @@ def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> ParseRe
         n_swa_layers = 0
     n_full_layers = layers - n_swa_layers
 
+    # Apply full_attention_interval: only every Nth full layer actually stores KV cache
+    # llama.cpp allocates KV for layers where (layer_idx + 1) % interval == 0
+    n_kv_layers = n_full_layers // full_attn_interval
+
     kv_shape = KVShape(
-        n_full_layers=n_full_layers,
+        n_full_layers=n_kv_layers,  # Use KV-storing layers, not total full layers
         n_swa_layers=n_swa_layers,
         n_head_kv=n_head_kv,
         key_len=key_len,
