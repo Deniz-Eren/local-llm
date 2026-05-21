@@ -14,7 +14,7 @@ For this test we use the main llama.cpp repo to utilize MTP and as such drop Tur
 
 These flags use `--spec-type` and `--spec-draft-n-max` as script options (now configurable in `run-server.sh`).
 
-Stable at 22 tokens/s, good token context +250k.
+Stable at 27 tokens/s, good token context +250k.
 ```bash
 run-server.sh --model Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf --n-cpu-moe 32 -c 262144 -ctk q8_0 -ctv q8_0 --alias "Qwen3.6-35B-A3B-Q8_0" --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
 ```

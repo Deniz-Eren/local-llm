@@ -31,6 +31,8 @@ SPEC_TYPE=""
 SPEC_DRAFT_N_MAX=""
 NO_MMAP=""
 MLOCK=""
+DRY_RUN=false
+QUIET=""
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 usage() {
@@ -58,6 +60,9 @@ Options:
                           (llama-server defaults to no-mmap; this flag
                           is redundant unless you want to be explicit.)
   --mlock                 Pin model weights in RAM (mlock).
+  --dry-run               Compose the full command and print it without
+                          launching. Useful for debugging or pasting into
+                          another terminal/screen.
   --quiet                 Run non-interactively (no server output).
   --fit off|on            Expert auto-fit mode (default: off).
   --spec-type TYPE        Speculative decoding type (e.g. draft-mtp).
@@ -83,6 +88,10 @@ Examples:
   ./scripts/run-server.sh -m ~/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
       --n-cpu-moe 382 --threads 28 --mlock --no-mmap \
       --alias Kimi-K2.6
+
+  # Dry-run: preview the command without launching
+  ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
+      --dry-run
 
   # Try fit mode to let llama.cpp auto-fit experts to VRAM
   ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
@@ -113,7 +122,8 @@ while [[ $# -gt 0 ]]; do
     --flash-attn)       FA="$2";          shift 2 ;;
     --spec-type)        SPEC_TYPE="$2";    shift 2 ;;
     --spec-draft-n-max) SPEC_DRAFT_N_MAX="$2"; shift 2 ;;
-    --quiet)            QUIET=true;        shift ;;
+    --quiet)            QUIET=1;           shift ;;
+    --dry-run)          DRY_RUN=true;      shift ;;
     --no-mmap)          NO_MMAP=1;         shift ;;
     --mlock)            MLOCK=1;           shift ;;
     --help|-h)          usage ;;
@@ -125,12 +135,23 @@ done
 [[ -z "${MODEL:-}" ]] && echo "Error: --model is required" && exit 1
 
 SERVER="${LLAMA_CPP_DIR}/build/bin/llama-server"
-[[ -x "$SERVER" ]] || { echo "Error: server not found at $SERVER"; exit 1; }
+# Skip server validation in dry-run mode — we're just composing the command
+if [[ "$DRY_RUN" != "true" ]]; then
+  [[ -x "$SERVER" ]] || { echo "Error: server not found at $SERVER"; exit 1; }
+fi
 
 # Auto-detect expert count from moe-configs.py if not given
 if [[ -z "$N_CPU_MOE" ]]; then
   echo "Auto-sizing from moe-configs.py ..."
-  FLAGS=$(python3 "$(dirname "$0")/moe-configs.py" "$MODEL" --quiet --json 2>/dev/null) || { echo "Error: moe-configs.py failed"; exit 1; }
+  # moe-configs.py exits 1 when the model doesn't fit — that's expected, not an error.
+  # Exit code > 1 or stderr with "not found" means a real failure.
+  _ERR=$(mktemp); _RC=0
+  FLAGS=$(python3 "$(dirname "$0")/moe-configs.py" "$MODEL" --quiet --json 2>"$_ERR") || _RC=$?
+  _STDERR=$(cat "$_ERR"); rm -f "$_ERR"
+  if [[ $_RC -gt 1 ]] || echo "$_STDERR" | grep -qi "not found\|error"; then
+    echo "Error: moe-configs.py failed: $_STDERR"; exit 1
+  fi
+  [[ $_RC -eq 1 ]] && echo "⚠ Model does not fit in configured VRAM/RAM budget (fits=false)"
 
   # Extract fields from JSON via jq
   N_CPU_MOE=$(echo "$FLAGS" | jq -r '.n_cpu_moe')
@@ -147,21 +168,56 @@ CTK="${CTK:-turbo4}"
 CTV="${CTV:-turbo3_tcq}"
 CTX="${CTX:-128000}"
 
-# Auto-detect threads (P-cores for hybrid Intel)
+# Auto-detect threads.
+# For hybrid Intel (P/E cores): use P-cores only (E-cores bottleneck GEMM).
+# Thread auto-detect: prefer physical cores for intra-GEMM parallelism.
+# On Intel hybrid (P+E-core) CPUs, only use P-cores since E-cores stall
+# the GEMM finish line and reduce per-core throughput.
 if [[ -z "$THREADS" ]]; then
   if grep -q 'Intel' /proc/cpuinfo 2>/dev/null; then
     if command -v lscpu &>/dev/null; then
-      # P-cores: physical cores × sockets
-      THREADS=$(lscpu | awk '/^Core\(s\) per socket:/ {cores=$NF}
-          /^Socket\(s\):/ {sockets=$NF}
-          END {print cores*sockets}')
+      # Detect hybrid via lscpu --extended: P-cores have higher MAXMHZ than E-cores.
+      # Example (i7-13850HX): E-cores at 3800 MHz, P-cores at 5100–5300 MHz.
+      # The lowest MAXMHZ identifies E-cores; everything above is P-cores.
+      # Not all P-cores share the same MAXMHZ (power/thermal variance), so we
+      # count unique CORE IDs (not threads) to get actual P-core count.
+      EXTENDED=$(lscpu --extended=CPU,CORE,MAXMHZ 2>/dev/null | tail -n +2)
+      if [[ -n "$EXTENDED" ]]; then
+        E_CORE_FREQ=$(echo "$EXTENDED" | awk '{print $3}' | sort -n | head -1)
+        if [[ -n "$E_CORE_FREQ" ]]; then
+          # Count unique P-core IDs (cores with MAXMHZ strictly above E-core floor)
+          P_CORE_COUNT=$(echo "$EXTENDED" | awk -v ef="$E_CORE_FREQ" '$3+0 > ef+0 {print $2}' | sort -un | wc -l)
+          TOTAL_CORES=$(echo "$EXTENDED" | awk '{print $2}' | sort -un | wc -l)
+          if [[ "$P_CORE_COUNT" -gt 0 && "$P_CORE_COUNT" -lt "$TOTAL_CORES" ]]; then
+            THREADS=$P_CORE_COUNT
+            echo "Hybrid Intel detected (P-cores only): $THREADS P-cores above E-core floor ($E_CORE_FREQ MHz)"
+          fi
+        fi
+      fi
+      # Fallback: non-hybrid (Xeon, older Core, AMD) or detection didn't find hybrid split
+      if [[ -z "$THREADS" ]]; then
+        THREADS=$(lscpu | awk '/^Core\(s\) per socket:/ {cores=$NF}
+            /^Socket\(s\):/ {sockets=$NF}
+            END {print cores*sockets}')
+      fi
     else
-      THREADS=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || nproc)
+      THREADS=$(nproc)
     fi
   else
     THREADS=$(nproc)
   fi
   echo "Auto-detected threads: $THREADS"
+fi
+
+# ── mlock-safe auto-guard (Task 13) ─────────────────────────────────────
+# If --mlock was requested but the model doesn't fit in RAM, disable it
+# to prevent OOM. We already have the JSON from auto-sizing.
+if [[ -n "$MLOCK" && -n "${FLAGS:-}" ]]; then
+  FITS=$(echo "$FLAGS" | jq -r '.fits' 2>/dev/null)
+  if [[ "$FITS" != "true" ]]; then
+    echo "⚠ RAM or VRAM over budget — disabling --mlock to prevent OOM"
+    MLOCK=""
+  fi
 fi
 
 # ── build command ───────────────────────────────────────────────────────────
@@ -190,10 +246,17 @@ CMD=(
 [[ -n "$MLOCK" ]]      && CMD+=(--mlock)
 
 # ── launch ──────────────────────────────────────────────────────────────────
+# --dry-run: compose and print the command without launching
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "# Would launch:"
+  echo "${CMD[*]}"
+  exit 0
+fi
+
 echo "Launching: ${CMD[*]}"
 echo ""
 
-if [[ "${QUIET:-false}" == "true" ]]; then
+if [[ -n "$QUIET" ]]; then
   exec "${CMD[@]}"
 else
   "${CMD[@]}"

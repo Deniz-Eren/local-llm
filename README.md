@@ -82,15 +82,32 @@ cmake -B build \
   -DCMAKE_CUDA_ARCHITECTURES=75 \
   -DCMAKE_BUILD_TYPE=Release \
   -DGGML_AVX512=ON \
+  -DGGML_AVX512_BF16=ON \
+  -DGGML_AVX512_VBMI=ON \
+  -DGGML_AVX512_VNNI=ON \
   -DCMAKE_C_FLAGS="-O3" \
   -DCMAKE_CXX_FLAGS="-O3"
 ```
 
-Two parts are required:
-- **`-DGGML_AVX512=ON`** — cmake preprocessor define that enables the AVX-512 code paths in ggml source.
-- **`-DGGML_NATIVE=ON`** — auto-detects the CPU and passes `-march=native` to the compiler so it emits the correct instruction set (including AVX-512F on compatible CPUs).
+All four flags are required for full speed — they each unlock a different code path in ggml's CPU GEMM kernels, and they compound because **MoE expert MLPs are almost entirely GEMM on the CPU**. Without any of them, you fall back to slower AVX2 paths; with all four, the dequant→GEMM pipeline runs at peak throughput.
+
+| Flag | What it enables | Impact |
+|------|----------------|--------|
+| **`-DGGML_AVX512=ON`** | Base AVX-512F code paths (512-bit vectors) | Without it, you get AVX2 — roughly half the per-cycle GEMM throughput on CPU-side expert MLPs. |
+| **`-DGGML_AVX512_VNNI=ON`** | VNNI dot-product instructions (`VPMADD52LUQ` / `VPMADD52NSI`) | Usually the single biggest win. Lets GEMM compute `sum(a[i] × b[i])` in one instruction instead of two. ~2× the dot products per cycle on the 237 RAM-resident experts running during decode. |
+| **`-DGGML_AVX512_BF16=ON`** | Native bfloat16 GEMM paths (BF16 instructions) | Prevents the slow path of emulating BF16 with integer/fp32 ops. Matters for internal BF16 GEMM accumulation and for MXFP4 models where the dequantized internal representation flows through BF16-compatible kernels. |
+| **`-DGGML_AVX512_VBMI=ON`** | Byte/word vector instructions (`VPERMB`, `VPOPCNT`, etc.) | Speeds up dequantization — unpacking Q4_K_S / Q4_K_XL weights from GGUF block format into usable values before GEMM. Less time shuffling data, more time multiply-accumulating. |
 
 Without the cmake option, the AVX-512 blocks aren't compiled at all, so you get AVX2 only — half the per-cycle GEMM throughput on the CPU-side expert MLPs.
+
+The reason they compound is that they remove different bottlenecks in the same decode pipeline:
+
+```
+decode step:  dequant weights → GEMM (expert MLP) → accumulate → next token
+              └─ VBMI helps ─┘  └─ VNNI + BF16 help ─┘
+```
+
+With only `GGML_AVX512=ON`, you get wide 512-bit vectors but fall back to the scalar-ish multiply-accumulate path, and dequant is slow. Add VNNI and the GEMM dot product doubles. Add BF16 and any BF16 internal path becomes native. Add VBMI and weight unpacking stops stalling the GEMM. All three feed into the same expert MLP execution hot path.
 
 #### Checking which AVX-512 extensions your CPU supports
 
@@ -111,12 +128,14 @@ Then enable the matching cmake options:
 
 | Extension | cmake flag | First microarch | What it speeds up |
 |-----------|-----------|-----------------|-------------------|
-| AVX-512F (base) | `GGML_AVX512=ON` | Skylake | All 512-bit GEMM paths |
-| AVX-512BW | `GGML_AVX512_BW=ON` | Cascade Lake | Byte/word GEMM ops |
-| AVX-512VL | *(bundled with F)* | Skylake | Vector length 256/512 |
-| AVX-512VNNI | `GGML_AVX512_VNNI=ON` | Cascade Lake | INT8 matmul (MoE experts) |
-| AVX-512BF16 | `GGML_AVX512_BF16=ON` | Cooper Lake / Zen 4 | BF16 GEMM |
-| AVX-512VBMI | `GGML_AVX512_VBMI=ON` | Cannon Lake | Vector byte/word ops |
+| AVX-512F (base) | `GGML_AVX512=ON` | Skylake | Base 512-bit GEMM — without it, falls back to AVX2 |
+| AVX-512BW | `GGML_AVX512_BW=ON` | Cascade Lake | Byte/word GEMM ops (rarely the bottleneck) |
+| AVX-512VL | *(bundled with F)* | Skylake | Vector length 256/512 — auto-enabled by F |
+| AVX-512VNNI | `GGML_AVX512_VNNI=ON` | Cascade Lake | VNNI dot-product — ~2× dot products/cycle on expert MLP GEMM |
+| AVX-512BF16 | `GGML_AVX512_BF16=ON` | Cooper Lake / Zen 4 | Native BF16 GEMM — avoids fp32 emulation |
+| AVX-512VBMI | `GGML_AVX512_VBMI=ON` | Cannon Lake | Dequant unpacking — keeps data flowing into GEMM |
+
+> **Build with all four.** They remove different bottlenecks (dequant → GEMM → accumulate) in the same decode hot path. Without any one of them, ggml falls back to slower scalar-ish paths on the CPU-side expert MLPs that dominate your decode throughput.
 
 # Sizing
 
@@ -222,11 +241,11 @@ Verify with `cat /proc/meminfo | grep Mlocked` after start: it should jump by th
 
 ## CPU thread count (`--threads`)
 
-`--threads` sets the number of CPU worker threads used to run the expert MLPs that `--n-cpu-moe` keeps in RAM. On hybrid Intel CPUs (Alder Lake and later, including 12th–14th Gen Core and Core Ultra) **set this to the number of P-cores only**. E-cores have lower per-core throughput and a different cache hierarchy; mixing them into the same parallel MLP gemm causes the P-cores to wait on the slowest E-core finisher every step, dropping decode tok/s. Hyper-threading siblings on the P-cores add contention for the same vector units and also hurt; one thread per P-core is the right setting.
+`--threads` sets the number of CPU worker threads used to run the expert MLPs that `--n-cpu-moe` keeps in RAM. On hybrid Intel CPUs (Alder Lake and later, including 12th–14th Gen Core and Core Ultra) **set this to the number of P-cores only**. E-cores have lower per-core throughput and a different cache hierarchy; mixing them into the same parallel MLP GEMM causes the P-cores to wait on the slowest E-core finisher every step, dropping decode tok/s. Hyper-threading siblings on the P-cores add contention for the same vector units and also hurt; one thread per P-core is the right setting.
 
 This development host is a **13th Gen Intel Core i7-13850HX**: 8 P-cores + 12 E-cores, 28 logical threads total. Canonical setting: `--threads 8` (one per P-core).
 
-For any other CPU, look up the **P-core count specifically** (not total cores, not total threads) and use that:
+For any other CPU, look up the **physical core count specifically** (not logical threads, not SMT siblings) and use that:
 
 | CPU class                                  | `--threads` rule                                         |
 |--------------------------------------------|----------------------------------------------------------|
@@ -234,6 +253,8 @@ For any other CPU, look up the **P-core count specifically** (not total cores, n
 | Intel non-hybrid (11th Gen and earlier Xeon/Core) | number of physical cores (ignore HT siblings)     |
 | AMD Ryzen / EPYC (Zen 2+)                  | number of physical cores (ignore SMT siblings)           |
 | Apple Silicon                              | number of P-cores                                        |
+
+`--threads` controls intra-GEMM parallelism inside each expert's MLP. More threads means faster matrix multiplies on each active expert, so on uniform (non-hybrid) CPUs the physical core count is the right setting — more cores = more parallelism inside each GEMM.
 
 Pinning helps too: `taskset -c 0-7 ./llama-server ...` (or the P-core CPU-list from `lscpu --extended`) keeps the scheduler from migrating workers onto E-cores or HT siblings under load.
 

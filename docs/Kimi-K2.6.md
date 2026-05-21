@@ -27,7 +27,7 @@ llama-server -m Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf \
     --host 0.0.0.0 --port 8080 \
     --no-warmup \
     --alias "Kimi-K2.6" \
-    --threads 8 \
+    --threads 14 \
     --no-mmap --mlock
 ```
 
@@ -140,6 +140,9 @@ cmake -B build \
   -DCMAKE_CUDA_ARCHITECTURES=75 \
   -DCMAKE_BUILD_TYPE=Release \
   -DGGML_AVX512=ON \
+  -DGGML_AVX512_BF16=ON \
+  -DGGML_AVX512_VBMI=ON \
+  -DGGML_AVX512_VNNI=ON \
   -DCMAKE_C_FLAGS="-O3" \
   -DCMAKE_CXX_FLAGS="-O3"
 cmake --build build -j$(nproc)
@@ -224,13 +227,13 @@ At this VRAM budget only 2 of 384 experts fit on GPU (128K context: 0). The rema
   -c 20000 \
   -fa on \
   --fit off \
-  --threads 28 \
+  --threads 14 \
   --host 0.0.0.0 --port 8080
 ```
 
 - `--n-cpu-moe 382` — only 2 experts fit on the 16 GiB GPU; the rest run on CPU.
 - `-c 20000` — profiling context; increase toward 128000 for long-term use when ready.
-- `--threads 28` — set to the full thread count for the Xeon Gold 5120 (14 physical cores × 2 threads each) since it's a non-hybrid processor.
+- `--threads 14` — set to the full core count for the Xeon Gold 5120 (14 physical cores × 2 threads each) since it's a non-hybrid processor.
 - `--no-mmap` is omitted here — add it if experts need to stay pinned in process RAM (see [main README Run section](../README.md#run) for guidance).
 
 ### Hypothetical future platforms

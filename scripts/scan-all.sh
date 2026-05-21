@@ -14,6 +14,9 @@ MOE_CONFIGS=""
 GGUF_PY_PATH=""
 OUTPUT_FORMAT="markdown"
 EXCLUDE=""
+NO_WARMUP=""
+NO_MMAP=""
+MLOCK=""
 
 # Python interpreter: prefer venv, fall back to system python3.
 if [[ -f "$(cd "$(dirname "$0")/.." && pwd)/.venv/bin/python3" ]]; then
@@ -40,6 +43,9 @@ Options:
   --format fmt            Output format: markdown | csv (default: markdown)
   --moe-configs PATH      Path to moe-configs.py (default: alongside this script)
   --gguf-py-path PATH     Path to gguf-py directory
+  --no-warmup             Append --no-warmup to output flag lines
+  --no-mmap               Append --no-mmap to output flag lines
+  --mlock                 Append --mlock to output flag lines
   --quiet                 Only print fitting models
   --help, -h              Show this help
 EOF
@@ -63,6 +69,9 @@ while [[ $# -gt 0 ]]; do
     --moe-configs)    MOE_CONFIGS="$2";  shift 2 ;;
     --gguf-py-path)   GGUF_PY_PATH="$2"; shift 2 ;;
     --quiet)          QUIET=true;   shift ;;
+    --no-warmup)      NO_WARMUP=1;  shift ;;
+    --no-mmap)        NO_MMAP=1;    shift ;;
+    --mlock)          MLOCK=1;      shift ;;
     *)                echo "Unknown option: $1"; usage ;;
   esac
 done
@@ -179,10 +188,19 @@ for config in "${CONFIGS[@]}"; do
   )
 done
 
+# ── helper: compose extra runtime flags ────────────────────────────────────
+extra_flags() {
+  local flags=""
+  [[ -n "$NO_WARMUP" ]] && flags+=" --no-warmup"
+  [[ -n "$NO_MMAP" ]] && flags+=" --no-mmap"
+  [[ -n "$MLOCK" ]] && flags+=" --mlock"
+  printf '%s' "$flags"
+}
+
 # ── output ──────────────────────────────────────────────────────────────────
 if [[ "$OUTPUT_FORMAT" == "csv" ]]; then
   # CSV header
-  echo "model,context,max_ctx,vram_used_mib,ram_used_mib,gpu_cpu,fit"
+  echo "model,context,max_ctx,vram_used_mib,ram_used_mib,gpu_cpu,fit,extra_flags"
   for model in "${ALL_MODELS[@]}"; do
     for config in "${CONFIGS[@]}"; do
       IFS='/' read -r k v <<< "$config"
@@ -190,14 +208,14 @@ if [[ "$OUTPUT_FORMAT" == "csv" ]]; then
       result="${RESULTS["${model}|${config_short}"]:-}"
       if [[ -n "$result" ]]; then
         IFS='|' read -r ctx max_ctx vram_mib ram_mib gpu_cpu fit <<< "$result"
-        echo "${model},${ctx},${max_ctx},${vram_mib},${ram_mib},${gpu_cpu},${fit}"
+        echo "${model},${ctx},${max_ctx},${vram_mib},${ram_mib},${gpu_cpu},${fit},$(extra_flags)"
       fi
     done
   done
 elif [[ "$OUTPUT_FORMAT" == "markdown" ]]; then
   # Markdown table
-  echo '| Model | Config | `ctx` | `max_ctx` | VRAM used | RAM used | GPU/CPU | FIT |'
-  echo '|-------|--------|-------|-----------|-----------|----------|---------|-----|'
+  echo '| Model | Config | `ctx` | `max_ctx` | VRAM used | RAM used | GPU/CPU | FIT | Extra Flags |'
+  echo '|-------|--------|-------|-----------|-----------|----------|---------|-------|-------------|'
   for model in "${ALL_MODELS[@]}"; do
     for config in "${CONFIGS[@]}"; do
       IFS='/' read -r k v <<< "$config"
@@ -207,7 +225,10 @@ elif [[ "$OUTPUT_FORMAT" == "markdown" ]]; then
         IFS='|' read -r ctx max_ctx vram_mib ram_mib gpu_cpu fit <<< "$result"
         bold_fit="${fit}"
         [[ "$fit" == "OK" ]] && bold_fit="**${fit}**"
-        echo "| ${model} | ${k}/${v} | ${ctx} | ${max_ctx} | ${vram_mib} MiB | ${ram_mib} MiB | ${gpu_cpu} | ${bold_fit} |"
+        flags=$(extra_flags)
+        # Strip leading space, wrap in backticks for markdown code formatting
+        [[ -n "$flags" ]] && flags="\`${flags# }\`"
+        echo "| ${model} | ${k}/${v} | ${ctx} | ${max_ctx} | ${vram_mib} MiB | ${ram_mib} MiB | ${gpu_cpu} | ${bold_fit} | ${flags} |"
       fi
     done
   done

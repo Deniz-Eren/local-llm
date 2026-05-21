@@ -641,8 +641,58 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
     return 1
 
 
+# ── AVX-512 diagnostic ────────────────────────────────────────────────────
+def check_avx() -> None:
+    """Read /proc/cpuinfo and report which instruction sets the CPU supports.
+    Useful for verifying the build matches the runtime CPU — especially
+    when building on a host different from the execution host (e.g. CI, cross-compilation, VM)."""
+    try:
+        cpuinfo = Path("/proc/cpuinfo").read_text().lower()
+    except FileNotFoundError:
+        print("⚠ /proc/cpuinfo not found — skipping AVX-512 check (non-Linux?)", file=sys.stderr)
+        return
+
+    flags = set(cpuinfo.split())
+
+    avx512_exts = [
+        ("avx512f",       "GGML_AVX512=ON"),
+        ("avx512bf16",    "GGML_AVX512_BF16=ON"),
+        ("avx512vnni",    "GGML_AVX512_VNNI=ON"),
+        ("avx512vbmi",    "GGML_AVX512_VBMI=ON"),
+        ("avx512bw",      "GGML_AVX512_BW=ON"),
+    ]
+
+    # Also report the instruction sets that ARE available
+    available_exts = [
+        "avx2", "avx_vnni", "avx512f", "avx512bf16", "avx512vnni",
+        "avx512vbmi", "avx512bw", "sse4_2", "sse4_1", "ssse3",
+    ]
+    available = sorted(set(e for e in available_exts if e in flags))
+
+    avx512_supported = [f"{cmake} ({name})" for name, cmake in avx512_exts if name in flags]
+    avx512_missing   = [f"{cmake} (CPU lacks {name})" for name, cmake in avx512_exts if name not in flags]
+
+    print(f"Available: {', '.join(available)}")
+    if avx512_supported:
+        print(f"AVX-512:   {', '.join(avx512_supported)}")
+    else:
+        print("AVX-512:   none")
+    if avx512_missing:
+        print(f"⚠ Missing (will fall back to slower paths): {', '.join(avx512_missing)}")
+    if not avx512_exts or not any(e in flags for e in ["avx512f", "avx512bf16", "avx512vnni"]):
+        if "avx2" in flags:
+            print("ℹ No AVX-512 — AVX2 paths will be used.")
+        elif "avx_vnni" in flags and "avx2" in flags:
+            print("ℹ AVX2 + VNNI available (good for GEMM), but no full AVX-512F.")
+        elif "avx" in flags:
+            print("ℹ AVX (256-bit) available but no AVX2 or AVX-512.")
+    sys.exit(0)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--check-avx", action="store_true",
+                    help="Check /proc/cpuinfo for AVX-512 extensions and exit.")
     ap.add_argument("gguf", nargs="?", help="Path to a .gguf model file (omit when using --scan)")
     ap.add_argument("--scan", metavar="DIR",
                     help="Scan a directory of .gguf files and recommend the best-fitting model")
@@ -672,6 +722,10 @@ def main() -> int:
     ap.add_argument("--models-file", default=None,
                     help="Path to a file with one model path per line (overrides --scan glob, for --exclude filtering)")
     args = ap.parse_args()
+
+    # --check-avx: diagnostic only, exit immediately
+    if args.check_avx:
+        check_avx()
 
     # Validate cache types
     cache_type_k = _validate_cache_type(args.cache_type_k)
