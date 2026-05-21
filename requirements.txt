@@ -1,3 +1,4 @@
 gguf-py>=0.0.7
 numpy
 PyYAML
+huggingface_hub

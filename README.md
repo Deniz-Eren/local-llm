@@ -137,6 +137,94 @@ Then enable the matching cmake options:
 
 > **Build with all four.** They remove different bottlenecks (dequant → GEMM → accumulate) in the same decode hot path. Without any one of them, ggml falls back to slower scalar-ish paths on the CPU-side expert MLPs that dominate your decode throughput.
 
+
+## Downloading models from Hugging Face
+
+Install the CLI first:
+
+```bash
+pip install -U huggingface_hub
+```
+
+Authenticate (only needed once, or if your repo uses a gated model):
+
+```bash
+huggingface-cli login
+# Enter your Hugging Face token when prompted
+```
+
+### Downloading a specific quantized GGUF
+
+To download only a single quantized variant (e.g. Q8_0) from a repo with many files:
+
+```bash
+huggingface-cli download unsloth/Qwen3.5-122B-A10B-MTP-GGUF \
+    --include "Q8_0/*" \
+    --local-dir ~/Downloads/models/Qwen3.5-122B-A10B-MTP-GGUF/Q8_0 \
+    --token YOUR_TOKEN_HERE
+```
+
+### Downloading all quantized variants
+
+To download every quantized variant (useful for scanning with `scan-all.sh`):
+
+```bash
+huggingface-cli download unsloth/Qwen3.5-122B-A10B-MTP-GGUF \
+    --include "Q2_K/*" \
+    --include "Q3_K_S/*" \
+    --include "Q3_K_M/*" \
+    --include "Q3_K_L/*" \
+    --include "Q4_0/*" \
+    --include "Q4_K_S/*" \
+    --include "Q4_K_M/*" \
+    --include "Q5_0/*" \
+    --include "Q5_K_S/*" \
+    --include "Q5_K_M/*" \
+    --include "Q6_K/*" \
+    --include "Q8_0/*" \
+    --local-dir ~/Downloads/models/Qwen3.5-122B-A10B-MTP-GGUF \
+    --token YOUR_TOKEN_HERE
+```
+
+### Downloading MTP models
+
+Models with an embedded MTP head (needed for `--spec-type draft-mtp`) are typically in the same repo but under a different naming scheme. Check the repo to see if the MTP variant is included:
+
+```bash
+# List files without downloading
+huggingface-cli list-repo-files unsloth/Qwen3.5-122B-A10B-MTP-GGUF \
+    --token YOUR_TOKEN_HERE | grep -i mtp
+```
+
+### Downloading to a remote server
+
+For large models over slow connections, use `--local-dir` to save locally, then rsync:
+
+```bash
+# Download to local machine
+huggingface-cli download unsloth/Qwen3.6-35B-A3B-GGUF \
+    --include "Q8_0/*" \
+    --local-dir /tmp/models-download
+
+# Then transfer to the server
+rsync -avz --progress /tmp/models-download/ user@server:~/Downloads/models/
+```
+
+### Checking disk space
+
+GGUF files are large — check the repo listing before committing to a full download:
+
+```bash
+# List all files in the repo (including sizes via the API)
+huggingface-cli repo-info unsloth/Qwen3.6-35B-A3B-GGUF | head -20
+
+# Or check a specific quantized file size from the API
+huggingface-cli list-repo-files unsloth/Qwen3.6-35B-A3B-GGUF --token YOUR_TOKEN_HERE | grep Q8_0
+
+# After download, check total size
+du -sh ~/Downloads/models/Qwen3.6-35B-A3B-GGUF/Q8_0
+```
+
 # Sizing
 
 ## Single model
