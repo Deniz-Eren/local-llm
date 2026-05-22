@@ -14,43 +14,52 @@ MiniMax M2.7 is a sparse MoE model much larger than the Qwen3.6 family. We are p
 
 Worked but unusable at 3-4 tokens/s, good token context +128k but tool calls regularly failed for unknown reasons:
 ```bash
-run-server.sh --model MiniMax-M2.7-Q8_0.gguf --n-cpu-moe 256 -c 149760 -ctk turbo4 -ctv turbo3_tcq --alias "MiniMax-M2.7-Q8_0" --threads 8 --no-mmap --mlock
+run-server.sh --model MiniMax-M2.7-Q8_0.gguf --n-cpu-moe 62 -c 92416 -ctk q8_0 -ctv q4_0 --alias "MiniMax-M2.7-Q8_0" --threads 14 --no-mmap --mlock
 ```
 
 ## Model
 
-run-server.sh --n-cpu-moe 256 -c 149760 -ctk turbo4 -ctv turbo3_tcq --alias "MiniMax-M2.7-Q8_0" --threads 8 --no-mmap --mlock
+Configuration script:
+```
+./scripts/moe-configs.py ~/models/MiniMax-M2.7-GGUF/Q8_0/MiniMax-M2.7-Q8_0.gguf --ctx 196608 --vram 16384 --ram 740000 --cache-type-k q8_0 --cache-type-v q4_0 --compute-overhead 3600
+```
 
-./scripts/moe-configs.py --gguf-py-path ../buun-llama-cpp/  --vram 16384 --ram 730956 ~/models/MiniMax-M2.7-GGUF/Q8_0/MiniMax-M2.7-Q8_0.gguf
+Configuration results:
+```
 Model:            MiniMax-M2.7-Q8_0.gguf
 Layers:           62
 Experts (total):  256  (active per token: 8)
-Context:          128000  (model max: 196608, VRAM-fit max: 196608)
+Context:          92416  (model max: 196608, VRAM-fit max: 92416)
 
 === Tensor sizes ===
   Dense backbone:          4201.49 MiB
   All experts:           227664.00 MiB
   One expert:               889.31 MiB
-  KV cache (K=turbo4, V=turbo3_tcq, eff 0.234x):    7261.75 MiB
+  KV cache (K=q8_0, V=q4_0, eff 0.383x):    8561.11 MiB
 
 === VRAM plan (budget 16384 MiB) ===
   Dense backbone:          4201.49 MiB
-  KV cache:                7261.75 MiB
-  Experts on GPU (  5):    4446.56 MiB
-  (precedence: dense -> KV cache (capped to fit) -> experts)
+  KV cache:                8561.11 MiB
+  Compute/MTP buffer:      3600.00 MiB
+  Experts on GPU (  0 layers,   0):       0.00 MiB
+  (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
   -------------------------------------
-  Used:                   15909.80 MiB  ( 15.54 GiB)
-  Headroom:                 474.20 MiB
+  Used:                   16362.60 MiB  ( 15.98 GiB)
+  Headroom:                  21.40 MiB
 
-=== RAM plan (budget 730956 MiB) ===
-  Experts on CPU (251):  223217.44 MiB
-  Headroom:              507738.56 MiB
+=== RAM plan (budget 740000 MiB) ===
+  Experts on CPU ( 62 layers, 256):  227664.00 MiB
+  Headroom:              512336.00 MiB
 
 === Verdict ===
   VRAM: OK
   RAM:  OK
-  -> Only 5 experts on GPU; per-token routing needs 8 active. On average 3 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Reduce --ctx or use a smaller quant if you need more GPU experts.
+  -> Only 0 experts on GPU; per-token routing needs 8 active. On average 8 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Offload fewer layers (--n-cpu-moe N, smaller N) to put more experts on GPU.
 
 === llama-server flag ===
-  --n-gpu-layers 999 --n-cpu-moe 251 -c 128000 -ctk turbo4 -ctv turbo3_tcq
+  --n-gpu-layers 999 --n-cpu-moe 62 -c 92416 -ctk q8_0 -ctv q4_0
+```
 
+# References
+
+- MiniMax-M2.7 229B GGUFs: https://huggingface.co/unsloth/MiniMax-M2.7-GGUF
