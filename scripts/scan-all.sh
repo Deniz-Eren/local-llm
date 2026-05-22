@@ -111,7 +111,7 @@ fi
 # ── scan each KV config (sequential — background jobs produce truncated output) ──
 for config in "${CONFIGS[@]}"; do
   IFS='/' read -r k v <<< "$config"
-  echo "Scanning: ${config} (K=$k, V=$v, ctx=$CTX, vram=${VRAM} MiB, ram=${RAM} MiB)"
+  [[ -z "$QUIET" ]] && echo "Scanning: ${config} (K=$k, V=$v, ctx=$CTX, vram=${VRAM} MiB, ram=${RAM} MiB)"
 
   outfile="${TMPDIR_SCAN}/${config//\//_}.json"
 
@@ -181,7 +181,7 @@ for config in "${CONFIGS[@]}"; do
          .fit_max_ctx,
          (.vram_used_mib | tostring),
          (.cpu_expert_mib | tostring),
-         ((.gpu_experts | tostring) + "/" + (.cpu_experts | tostring)),
+         ((.gpu_layers | tostring) + "/" + (.cpu_layers | tostring)),
          (if .fits then "OK" else "vram" end)] |
         join("\t")
       end' "$json_file" 2>/dev/null
@@ -249,6 +249,7 @@ elif [[ "$OUTPUT_FORMAT" == "markdown" ]]; then
     done
   done
   # Task 24: summary aggregation
+  if [[ -z "$QUIET" ]]; then
   echo ""
   echo "### Summary"
   total_count=0
@@ -274,4 +275,5 @@ elif [[ "$OUTPUT_FORMAT" == "markdown" ]]; then
   echo "- **Total config/model combinations:** ${total_count}"
   echo "- **Fitting:** ${fit_count}"
   echo "- **Not fitting:** ${non_fit_count}"
+  fi
 fi

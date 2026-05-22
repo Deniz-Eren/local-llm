@@ -30,9 +30,18 @@ The remaining experts live in RAM and run on CPU when routed.
 Tracked files only:
 
 - `README.md` — append-only scratchpad of working commands, tested `llama-server` invocations, and measured tokens/sec, RAM, VRAM numbers.
-- `scripts/moe-configs.py` — heuristic that picks `--n-cpu-moe` for a given GGUF.
 - `AGENTS.md` — this file.
 - `.gitignore` — excludes the cloned llama.cpp fork directory (`llama.cpp/`) so the working checkout can live alongside the repo files without being committed.
+- `LICENSE` — MIT License.
+- `requirements.txt` — Python dependencies for the sizing tool.
+- `scripts/moe-configs.py` — heuristic that picks `--n-cpu-moe` for a given GGUF.
+- `scripts/run-server.sh` — launch wrapper for llama-server with MoE expert routing and TurboQuant KV.
+- `scripts/scan-all.sh` — scan models across multiple KV cache configurations.
+- `docs/Kimi-K2.6.md` — profiling notes for Kimi K2.6.
+- `docs/MiniMax-M2.7.md` — profiling notes for MiniMax M2.7.
+- `docs/Qwen3.5-122B-A10B-MTP.md` — profiling notes for Qwen3.5 122B-A10B with MTP.
+- `docs/Qwen3.6-35B-A3B-MTP.md` — profiling notes for Qwen3.6 35B-A3B with MTP.
+- `docs/TASKS.md` — script improvement task tracker.
 
 External to the repo (not tracked, paths supplied by the caller):
 

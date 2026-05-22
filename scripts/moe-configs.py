@@ -507,9 +507,13 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
         print(f"  [verbose] fit_ctx_raw={fit_ctx_raw}  fit_max_ctx={fit_max_ctx}", file=sys.stderr)
 
     # Step 2b: cap the requested (or default) ctx by model_max and VRAM-fit.
-    requested_ctx = ctx if ctx is not None else result.model_max_ctx
+    # ctx == 0 or ctx is None → use model's trained max context.
+    if ctx is None or ctx == 0:
+        requested_ctx = result.model_max_ctx
+    else:
+        requested_ctx = ctx
     chosen_ctx = align_ctx_down(min(requested_ctx, result.model_max_ctx, fit_ctx_raw))
-    if ctx is not None and chosen_ctx < align_ctx_down(ctx):
+    if ctx is not None and ctx > 0 and chosen_ctx < align_ctx_down(ctx):
         reasons = []
         if requested_ctx > result.model_max_ctx:
             reasons.append(f"model_max_ctx={result.model_max_ctx}")
@@ -620,8 +624,8 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
         print(f"  -> Only {p.gpu_experts} experts on GPU; per-token routing needs "
               f"{p.active} active. On average {p.active - p.gpu_experts} of the "
               "active expert MLPs per token will run on CPU instead of GPU "
-              "(slower per-token compute). Offload fewer layers (--n-cpu-moe N, "
-              "smaller N) to put more experts on GPU.")
+              "(slower per-token compute). Reduce --n-cpu-moe N to pin fewer "
+              "layers to CPU, thereby keeping more layers (and their experts) on GPU.")
     print()
     print("=== llama-server flag ===")
     print(f"  {flag_line(p)}")
@@ -794,9 +798,9 @@ def main() -> int:
     ap.add_argument("--cache-type-v", default=CACHE_TYPE_V_DEFAULT,
                     help=f"KV cache type for values (default: {CACHE_TYPE_V_DEFAULT}). "
                          f"Choices: {_valid_cache_types()}")
-    ap.add_argument("--ctx",  type=int, default=128000,
+    ap.add_argument("--ctx",  type=int, default=None,
                     help="Context length used for KV-cache sizing (default: 128000). "
-                         "Pass --ctx 0 to use the model's trained max context, or a larger value "
+                         "Pass --ctx 0 to use the model's trained max context, or any other value "
                          "to stretch as far as VRAM allows.")
     ap.add_argument("--quiet", "-q", action="store_true",
                     help="Print only the recommended llama-server flags")

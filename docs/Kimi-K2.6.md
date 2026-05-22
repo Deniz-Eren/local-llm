@@ -16,7 +16,7 @@ Worked but unusable at 1-2 tokens/s and small context of 50k:
 ```bash
 llama-server -m Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf \
     --n-gpu-layers 999 \
-    --n-cpu-moe 384 \
+    --n-cpu-moe 61 \
     -ctk q4_0 \
     -ctv turbo3_tcq \
     -c 49920 \
@@ -89,7 +89,7 @@ Context:          256  (model max: 262144, VRAM-fit max: 256)
   Experts on GPU (  0):    0.00 MiB
   VRAM used:          22681.88 MiB  (OVER BUDGET by ~6298 MiB)
   RAM used:          544320.00 MiB
-  Flags: --n-cpu-moe 384 -c 256 -ctk turbo3_tcq -ctv turbo3_tcq
+  Flags: --n-cpu-moe 61 -c 256 -ctk turbo3_tcq -ctv turbo3_tcq
 ```
 
 ### Q8_K_XL on RTX 4090 (24 GiB VRAM)
@@ -155,7 +155,7 @@ Key flags:
 - **`-DCMAKE_CUDA_ARCHITECTURES=75`** — targets the T4's Turing architecture (sm_75).
 - **`-DCMAKE_BUILD_TYPE=Release`** — optimize build type.
 
-AVX-512 accelerates the CPU-side expert MLPs that `--n-cpu-moe` keeps in RAM. Without it, the Xeon Gold 5120 falls back to AVX2 (256-bit), halving the per-cycle throughput of the expert GEMM kernels.
+AVX-512 accelerates the CPU-side expert MLPs for the layers that `--n-cpu-moe` pins in RAM. Without it, the Xeon Gold 5120 falls back to AVX2 (256-bit), halving the per-cycle throughput of the expert GEMM kernels.
 
 ## Sizing
 
@@ -192,27 +192,27 @@ Context:          19968  (model max: 262144, VRAM-fit max: 157184)
   Experts on GPU (  2):    2835.00 MiB
   VRAM used:          15691.53 MiB
   RAM used:          541485.00 MiB
-  Flags: --n-cpu-moe 382 -c 19968 -ctk turbo3_tcq -ctv turbo3_tcq
+  Flags: --n-cpu-moe 61 -c 19968 -ctk turbo3_tcq -ctv turbo3_tcq
 ```
 
 **Note:** We use `-c 20000` (rounded to 19968 by CTX_PAD alignment) as a practical profiling limit — it keeps the KV cache small (~513 MiB) for faster iteration during experimentation. The hardware can easily support much larger contexts: the VRAM-fit max is 157184 tokens at `turbo3_tcq`, and 128000 is the preferred default for long-term work. Lower `-c` simply keeps VRAM profiling manageable while the model is still being profiled.
 
 ### Config strategy comparison
 
-| Configuration | KV cache | GPU experts | VRAM used | RAM used | Notes |
-|---------------|----------|-------------|-----------|----------|-------|
+| Configuration | KV cache | GPU layers | VRAM used | RAM used | Notes |
+|---------------|----------|-----------:|----------:|---------:|-------|
 | **`@ 20K — profiling`** | | | | | |
-| `turbo3_tcq` / `turbo3_tcq` | 513 MiB | 2 / 382 | 15692 MiB | 541485 MiB | Default for profiling |
-| `turbo4` / `turbo4` | 671 MiB | 2 / 382 | 15850 MiB | 541485 MiB | Lossless keys |
-| `turbo4` / `turbo3_tcq` | 597 MiB | 2 / 382 | 15775 MiB | 541485 MiB | Asymmetric: lossless K, tight V |
-| `turbo3_tcq` / `turbo2_tcq` | 439 MiB | 2 / 382 | 15617 MiB | 541485 MiB | Tightest |
+| `turbo3_tcq` / `turbo3_tcq` | 513 MiB | 0 / 61 | 12856 MiB | 544320 MiB | 0 GPU; dense + KV + compute overhead fills budget |
+| `turbo4` / `turbo4` | 671 MiB | 0 / 61 | 13014 MiB | 544320 MiB | Lossless keys; 0 GPU |
+| `turbo4` / `turbo3_tcq` | 597 MiB | 0 / 61 | 12939 MiB | 544320 MiB | Asymmetric; lossless K, tight V |
+| `turbo3_tcq` / `turbo2_tcq` | 439 MiB | 0 / 61 | 12781 MiB | 544320 MiB | Tightest KV; 0 GPU |
 | **`@ 128K — long-term`** | | | | | |
-| `turbo3_tcq` / `turbo3_tcq` | 3289 MiB | 0 / 384 | 15633 MiB | 544320 MiB | 0 GPU; 8 active experts on CPU |
-| `turbo4` / `turbo4` | 4035 MiB | 0 / 384 | 16379 MiB | 544320 MiB | Lossless; 0 GPU; VRAM nearly full |
-| `turbo4` / `turbo3_tcq` | 3825 MiB | 0 / 384 | 16169 MiB | 544320 MiB | Asymmetric; 0 GPU |
-| `turbo3_tcq` / `turbo2_tcq` | 2813 MiB | 0 / 384 | 15156 MiB | 544320 MiB | Tightest; still 0 GPU at 128K |
+| `turbo3_tcq` / `turbo3_tcq` | 3289 MiB | 0 / 61 | 15633 MiB | 544320 MiB | 0 GPU; 8 active experts on CPU |
+| `turbo4` / `turbo4` | 4035 MiB | 0 / 61 | 16379 MiB | 544320 MiB | Lossless; 0 GPU; VRAM nearly full |
+| `turbo4` / `turbo3_tcq` | 3825 MiB | 0 / 61 | 16169 MiB | 544320 MiB | Asymmetric; 0 GPU |
+| `turbo3_tcq` / `turbo2_tcq` | 2813 MiB | 0 / 61 | 15156 MiB | 544320 MiB | Tightest; 0 GPU at 128K |
 
-At this VRAM budget only 2 of 384 experts fit on GPU (128K context: 0). The remaining experts run on CPU — by design — and the 740 GiB RAM budget accommodates all 382 CPU-side experts (~531 GiB) with ~210 GiB headroom.
+`--n-cpu-moe N` takes a **layer count** (0–61 for Kimi K2.6). At 20K context the 16 GiB T4 holds only the dense backbone (~12.3 GiB) and a small KV cache — there's no room for even one layer's expert weights (~8.9 GiB). At 128K the KV cache grows to ~2.8–4.0 GiB, still leaving zero room for GPU experts. All 61 layers run on CPU with the 740 GiB RAM budget providing ample headroom for all 384 CPU-side experts (~531 GiB).
 
 ## Canonical run command
 
@@ -221,7 +221,7 @@ At this VRAM budget only 2 of 384 experts fit on GPU (128K context: 0). The rema
   -m ~/Downloads/models/Kimi-K2.6/Kimi-K2.6-UD-Q4_K_XL.gguf \
   --alias Kimi-K2.6 \
   --n-gpu-layers 999 \
-  --n-cpu-moe 382 \
+  --n-cpu-moe 61 \
   -ctk turbo3_tcq \
   -ctv turbo3_tcq \
   -c 20000 \
@@ -231,7 +231,7 @@ At this VRAM budget only 2 of 384 experts fit on GPU (128K context: 0). The rema
   --host 0.0.0.0 --port 8080
 ```
 
-- `--n-cpu-moe 382` — only 2 experts fit on the 16 GiB GPU; the rest run on CPU.
+- `--n-cpu-moe 61` — all 61 layers run on CPU; 0 GPU experts (the 16 GiB T4 is too small for any expert layers on GPU).
 - `-c 20000` — profiling context; increase toward 128000 for long-term use when ready.
 - `--threads 14` — set to the full core count for the Xeon Gold 5120 (14 physical cores × 2 threads each) since it's a non-hybrid processor.
 - `--no-mmap` is omitted here — add it if experts need to stay pinned in process RAM (see [main README Run section](../README.md#run) for guidance).
@@ -242,47 +242,49 @@ The sizing script can also evaluate what a heavier host would enable. These are 
 
 #### RTX 5090 (32 GiB VRAM)
 
-| KV config | `--n-cpu-moe` | GPU exp | `-c` | VRAM used | RAM used | FIT |
-|-----------|--------------:|--------:|-----:|----------:|---------:|-----|
-| `turbo3_tcq` | 372 | 12 / 384 | 128000 | 32643 MiB | 527310 MiB | **OK** |
-| `turbo4` / `turbo4` | 11 / 384 | 11 / 384 | 128000 | 32643 MiB | 528727 MiB | **OK** |
-| `turbo4` / `turbo3_tcq` | 12 / 384 | 12 / 384 | 128000 | 32643 MiB | 527310 MiB | **OK** |
+| KV config | `--n-cpu-moe` | GPU layers | `-c` | VRAM used | RAM used | FIT |
+|-----------|--------------:|-----------:|-----:|----------:|---------:|-----|
+| `turbo3_tcq` | 61 | 0 / 61 | 128000 | 32643 MiB | 527310 MiB | **OK** |
+| `turbo4` / `turbo4` | 61 | 0 / 61 | 128000 | 32643 MiB | 528727 MiB | **OK** |
+| `turbo4` / `turbo3_tcq` | 61 | 0 / 61 | 128000 | 32643 MiB | 527310 MiB | **OK** |
 
-At 128K context with `turbo3_tcq` the RTX 5090 holds **12 GPU experts**. The remaining 125 MiB VRAM headroom is thin — bumping to `turbo4`/`turbo4` (lossless K+V) pushes KV from 3289 MiB to 4035 MiB, still fitting with ~280 MiB headroom. At full 262144 context the VRAM-fit max is 262144, and RAM headroom is ~500 GiB — the GPU is the binding constraint.
+At 128K context the RTX 5090 (32 GiB) is dominated by the dense backbone (~22.2 GiB) and compute overhead (~4 GiB). The per-layer expert cost for Kimi is ~8.9 GiB, leaving no room for even 1 GPU layer at any KV config. All 61 layers run on CPU with `--n-cpu-moe 61`. The 740 GiB RAM budget provides ample headroom for all 384 CPU-side experts (~531 GiB). At 262144 context the VRAM-fit max is 262144 and RAM headroom is ~500 GiB — the GPU is the binding constraint.
 
-**Verdict:** RTX 5090 is the best fit at 128K context and the clear production target.
+**Verdict:** RTX 5090 is the most capable host but Kimi's large per-layer expert size (~8.9 GiB) means all layers still run on CPU even here. Useful for long context with CPU expert routing.
 
 #### RTX 4090 (24 GiB VRAM)
 
-| KV config | `--n-cpu-moe` | GPU exp | `-c` | VRAM used | RAM used | FIT |
-|-----------|--------------:|--------:|-----:|----------:|---------:|-----|
-| `turbo3_tcq` | 378 | 6 / 384 | 128000 | 24138 MiB | 535815 MiB | **OK** |
-| `turbo4` / `turbo4` | 6 / 384 | 6 / 384 | 128000 | 24138 MiB | 535815 MiB | **OK** |
-| `turbo4` / `turbo3_tcq` | 7 / 384 | 7 / 384 | 128000 | 24138 MiB | 534397 MiB | **OK** |
+| KV config | `--n-cpu-moe` | GPU layers | `-c` | VRAM used | RAM used | FIT |
+|-----------|--------------:|-----------:|-----:|----------:|---------:|-----|
+| `turbo3_tcq` | 61 | 0 / 61 | 128000 | 24138 MiB | 535815 MiB | **OK** |
+| `turbo4` / `turbo4` | 61 | 0 / 61 | 128000 | 24138 MiB | 535815 MiB | **OK** |
+| `turbo4` / `turbo3_tcq` | 61 | 0 / 61 | 128000 | 24138 MiB | 534397 MiB | **OK** |
 
-At 128K context with `turbo3_tcq` the RTX 4090 holds **6 GPU experts** (2 fewer than the 8 active per token, meaning every token routes at least 2 experts from RAM). The 438 MiB VRAM headroom is generous enough that even `turbo4`/`turbo4` still fits.
+At 128K context the RTX 4090 (24 GiB) is dominated by the dense backbone (~22.2 GiB) and compute overhead (~4 GiB). The per-layer expert cost (~8.9 GiB) exceeds remaining VRAM, so `--n-cpu-moe 61` (all layers on CPU). All 384 experts run on CPU — every token routes all 8 active experts from RAM.
 
-**Verdict:** The RTX 4090 fits at 128K context with 6 GPU experts. It is viable but offers fewer GPU experts than the 5090 — more GPU experts reduces PCIe expert fetches, which is an opportunistic optimization rather than a requirement.
+**Verdict:** RTX 4090 is viable but all Kimi K2.6 layers run on CPU at this quant. The 740 GiB RAM budget handles the 531 GiB expert weights easily.
 
 #### RTX 4090 (24 GiB VRAM) at max context
 
 At `-c 262144` the RTX 4090 drops to **3 GPU experts**, since the larger KV cache leaves less room on the GPU.
 
-| KV config | `--n-cpu-moe` | GPU exp | `-c` | VRAM used | RAM used | FIT |
-|-----------|--------------:|--------:|-----:|----------:|---------:|-----|
-| `turbo3_tcq` | 381 | 3 / 384 | 262144 | 23332 MiB | 540067 MiB | **OK** |
+| KV config | `--n-cpu-moe` | GPU layers | `-c` | VRAM used | RAM used | FIT |
+|-----------|--------------:|-----------:|-----:|----------:|---------:|-----|
+| `turbo3_tcq` | 61 | 0 / 61 | 262144 | 23332 MiB | 540067 MiB | **OK** |
 
-**Verdict:** At 262144 context the RTX 4090 fits with 3 GPU experts. Fewer GPU experts means more PCIe traffic for expert weight fetches — a valid trade-off if the larger context is needed.
+**Verdict:** At 262144 context the RTX 4090 fits with `--n-cpu-moe 61` (all 61 layers on CPU, 0 GPU experts). The larger KV cache leaves no room for GPU experts. All expert MLPs run on the Xeon Gold 5120 — valid if the larger context is needed.
 
 ---
 
 ### Summary: host comparison for Kimi K2.6 at 128K
 
-| Host | VRAM | GPU experts | RAM used | VRAM headroom | Recommendation |
-|------|------|------------|----------|---------------|----------------|
-| RTX 5090 | 32 GiB | 12 / 384 | 527310 MiB | ~125 MiB | ✅ Production target |
-| RTX 4090 | 24 GiB | 6 / 384 | 535815 MiB | ~438 MiB | ⚠️ Viable, fewer GPU experts |
-| T4 | 16 GiB | 0 / 384 | 544320 MiB | ~750 MiB | ⚠️ Viable, fewer GPU experts |
+`--n-cpu-moe N` takes a **layer count** (0–61). Kimi's large per-layer expert size (~8.9 GiB) means all layers run on CPU across all tested hosts. Expert routing happens entirely in RAM.
+
+| Host | VRAM | GPU layers | RAM used | VRAM headroom | Recommendation |
+|------|------|-----------:|----------|---------------|----------------|
+| RTX 5090 | 32 GiB | 0 / 61 | 527310 MiB | ~125 MiB | ✅ Best RAM budget |
+| RTX 4090 | 24 GiB | 0 / 61 | 535815 MiB | ~438 MiB | ⚠️ Viable, less headroom |
+| T4 | 16 GiB | 0 / 61 | 544320 MiB | ~750 MiB | ⚠️ Viable, minimal context
 
 ## References
 

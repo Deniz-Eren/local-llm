@@ -56,7 +56,7 @@ Context:          262144  (model max: 262144, VRAM-fit max: 262144)
 === Verdict ===
   VRAM: OK
   RAM:  OK
-  -> Only 5 experts on GPU; per-token routing needs 8 active. On average 3 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Offload fewer layers (--n-cpu-moe N, smaller N) to put more experts on GPU.
+  -> Only 5 layers (40 experts) on GPU; per-token routing needs 8 active. On average 3 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Offload fewer layers (`--n-cpu-moe N`, smaller `N`) to put more layers — and more experts — on GPU.
 
 === llama-server flag ===
   --n-gpu-layers 999 --n-cpu-moe 48 -c 262144 -ctk q8_0 -ctv q8_0

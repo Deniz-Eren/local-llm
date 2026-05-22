@@ -32,24 +32,22 @@ Improvements for the three scripts in `scripts/`, ordered by priority.
 | 22 | `run-server.sh` | Feature: `--no-spec-type` fallback | 🟡 | ✅ | Auto-detects MTP weights and warns if missing |
 | 23 | `moe-configs.py` | Feature: `--json --verbose` mode | 🟢 | ✅ | Adds `_verbose` object to JSON output |
 | 24 | `scan-all.sh` | Feature: summary aggregation | 🟢 | ✅ | Markdown table summary + CSV comment |
+| 25 | `moe-configs.py` | Bug: `--ctx 0` unreachable | 🔴 | ✅ | Changed argparse default from `128000` to `None`; `ctx == 0` now means "use model max" |
+| 26 | `moe-configs.py`, `README.md`, `docs/Kimi-K2.6.md` | Bug: README/doc `--n-cpu-moe` values used expert counts, not layers | 🔴 | ✅ | Confirmed fork's `--n-cpu-moe` takes layer counts (commit 8067bc0); README/examples updated with correct layer counts
+| 27 | `README.md` | Doc error: `--mlock-safe` documented as flag | 🟡 | ✅ | Resolved: auto-guard is implicit (no flag needed); docs describe correct behavior |
+| 28 | `README.md` | Doc error: `q4_0`/`iq4_nl` factor wrong | 🟡 | ✅ | Fixed bpv ~0.5, factor 0.25 (was bpv 1.0, factor 0.5); ×4.0 column was correct |
+| 29 | `run-server.sh` | Doc error: `--threads 28` example wrong | 🟡 | ✅ | Changed to `--threads 14` (physical cores for Xeon Gold 5120); updated TASKS description to reference correct file
+| 30 | `docs/Qwen3.6-35B-A3B-MTP.md` | Doc error: stale config/results mismatch | 🟡 | ✅ | Removed erroneous `--ram 730956` from command (results use default 32768) |
+| 31 | `moe-configs.py`, `scan-all.sh`, `README.md` | Ambiguity: `GPU/CPU` meant layers vs experts | 🟡 | ✅ | Confirmed fork's `--n-cpu-moe` takes layers (commit 8067bc0); unified scan output to layers (`gpu_layers/cpu_layers`); README header says `GPU/CPU`
+| 32 | `AGENTS.md` | Doc error: tracked files undercounted | 🟢 | ✅ | Added all 12 tracked files to repository layout section |
+| 33 | `run-server.sh` | Cosmetic: `--no-mmap` redundant claim | 🟢 | ✅ | Rewrote help text to be factual and less confusing |
+| 34 | `scan-all.sh` | Feature: `--quiet` parsed but dead code | 🟢 | ✅ | Now suppresses scanning progress lines and markdown summary
 
 ---
 
-## Open Issues — Docs/Script Conflicts (Found 2026-05-22)
+## Open Issues
 
-These are conflicts between documents and actual code/behavior. Ordered by severity.
-
-| # | Severity | File(s) | Type | Description |
-|---|----------|---------|------|-------------|
-| 25 | 🔴 | `README.md`, `moe-configs.py` | Bug | **`--ctx 0` does nothing.** README says `--ctx 0` uses the model's trained max, but `argparse` default is `128000`, so `--ctx 0` sets `ctx=0` (not `None`). Result: 0-token context. The documented feature is unreachable. |
-| 26 | 🔴 | `README.md`, `moe-configs.py` | Bug | **`--n-cpu-moe 237` on a 40-layer model.** README canonical command uses `--n-cpu-moe 237` for Qwen3.6-35B-A3B (40 layers). `moe-configs.py`'s `Plan.n_cpu_moe` returns `cpu_layers`, which can be at most 40. Either the README example is wrong, or `--n-cpu-moe` in this fork actually accepts expert counts (contradicting the docstring). |
-| 27 | 🟡 | `README.md` | Doc error | **`--mlock-safe` as a flag that doesn't exist.** README documents `--mlock-safe` as a toggleable flag, but `run-server.sh` has no such argument. The auto-guard is implicit and always-on. Either remove the flag from docs or add the CLI option. |
-| 28 | 🟡 | `README.md` | Doc error | **`q4_0` / `iq4_nl` factor column is wrong.** README table lists bpv=1.0 and factor=0.5 (implying 2x smaller). Code has bpe=0.5 -> factor=0.25. The "x4.0 smaller" column is correct; factor and bpv are both wrong in the doc. |
-| 29 | 🟡 | `README.md` | Doc error | **`--threads 28` example contradicts docs.** README `--threads` example for Kimi-K2.6 uses `--threads 28`, but the documentation says non-hybrid Intel uses physical cores (14 for Xeon Gold 5120). The canonical Kimi-K2.6.md command uses `--threads 14` (correct). |
-| 30 | 🟡 | `docs/Qwen3.6-35B-A3B-MTP.md` | Doc error | **Config results don't match command.** Command passes `--ram 730956`, but results block shows budget 32768 (default). Headroom math (26112 + 6656 = 32768) confirms the results are from a different run than the command shown. |
-| 31 | 🟡 | `README.md` | Ambiguity | **`GPU/CPU` column ambiguous.** README table header says `GPU/CPU` but two tools use different meanings: `moe-configs.py --scan` prints `gpu_layers/cpu_layers`; `scan-all.sh` prints `gpu_experts/cpu_experts`. Values don't sum to a consistent total (57+71=128 layers; 19+237=256 experts). |
-| 32 | 🟢 | `AGENTS.md`, `README.md` | Doc error | **Tracked files undercounted.** AGENTS.md lists 4 tracked files; the repo also tracks `requirements.txt`, `LICENSE`, `scripts/run-server.sh`, `scripts/scan-all.sh`, and 5 files in `docs/`. |
-| 33 | 🟢 | `run-server.sh`, `README.md` | Cosmetic | **`--no-mmap` default claim.** README says llama-server defaults to `--no-mmap` and the flag is redundant. But `run-server.sh` doesn't add it by default. If it truly defaults to no-mmap in llama-server, the canonical command should drop it. |
+No open issues. All conflicts found 2026-05-22 have been resolved.
 
 ---
 
@@ -65,10 +63,6 @@ A `--benchmark` flag that launches, runs a fixed prompt, measures tok/s, prints 
 - Streaming: measure first-token latency separately from decode tok/s?
 - Exit code: 0 on success, non-zero if tok/s below threshold (`--benchmark-threshold`)?
 - Output format: plain text summary or JSON for CI consumption?
-
-### `--quiet` in `scan-all.sh` (Issue 34)
-
-The `--quiet` flag is parsed but never used -- the full table is always printed. Could suppress the scanning progress lines and only print fitting models, but hasn't been needed yet.
 
 ---
 

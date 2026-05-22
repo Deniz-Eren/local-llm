@@ -23,7 +23,7 @@ run-server.sh --model Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf --n-cpu
 
 Configuration script:
 ```
-./scripts/moe-configs.py --gguf-py-path ../llama.cpp/  --vram 16384 --ram 730956 ~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf --cache-type-k q8_0 --cache-type-v q8_0 --ctx 262144
+./scripts/moe-configs.py --gguf-py-path ../llama.cpp/  --vram 16384 ~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf --cache-type-k q8_0 --cache-type-v q8_0 --ctx 262144
 ```
 
 Configuration results:
@@ -59,6 +59,8 @@ Context:          262144  (model max: 262144, VRAM-fit max: 262144)
 
 === llama-server flag ===
   --n-gpu-layers 999 --n-cpu-moe 32 -c 262144 -ctk q8_0 -ctv q8_0
+
+# `--n-cpu-moe 32` pins 32 of 40 layers to CPU RAM; 8 layers on GPU. For shared-expert Qwen3.6 (256 experts across all 40 layers), 8 GPU layers ≈ 51 GPU experts.
 ```
 
 # References

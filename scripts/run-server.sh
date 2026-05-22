@@ -57,9 +57,9 @@ Options:
   --host HOST             Listen address (default: 0.0.0.0).
   --port PORT             Listen port (default: 8080).
   --llama-cpp-dir DIR     Path to llama.cpp checkout (default: ./llama.cpp).
-  --no-mmap               Override: disable memory mapping.
-                          (llama-server defaults to no-mmap; this flag
-                          is redundant unless you want to be explicit.)
+  --no-mmap               Disable memory mapping. (Passing it is redundant
+                          since llama-server defaults to --no-mmap; included
+                          for explicitness in examples and debugging.)
   --mlock                 Pin model weights in RAM (mlock).
   --dry-run               Compose the full command and print it without
                           launching. Useful for debugging or pasting into
@@ -89,7 +89,7 @@ Examples:
 
   # Explicit mmap / mlock flags (Kimi K2.6 canonical)
   ./scripts/run-server.sh -m ~/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
-      --n-cpu-moe 382 --threads 28 --mlock --no-mmap \
+      --n-cpu-moe 382 --threads 14 --mlock --no-mmap \
       --alias Kimi-K2.6
 
   # Dry-run: preview the command without launching

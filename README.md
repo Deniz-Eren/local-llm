@@ -24,7 +24,7 @@ Then run the tools as usual — they resolve `gguf-py` from the venv. You can al
 
 A 35B MoE has only ~3B parameters active per token (8 of 256 experts on Qwen3.6-35B-A3B). The other ~31B can sit cold in slow memory at no per-token cost — provided we can route the active 8 into compute quickly.
 
-`--n-cpu-moe N` keeps `N` experts pinned in RAM and **runs their MLP on CPU threads in place**; it does *not* copy expert weights to the GPU. Per token: GPU runs attention + dense layers, the router picks 8 experts, those 8 MLPs run wherever their weights live, and only the small output activations cross PCIe to be summed back into the residual stream. Throughput is gated by CPU MLP compute, not PCIe bandwidth on weight transfers.
+`--n-cpu-moe N` keeps `N` MoE layers (each with its own set of expert tensors) pinned in RAM and **runs their MLP on CPU threads in place**; it does *not* copy expert weights to the GPU. Per token: GPU runs attention + dense layers, the router picks 8 experts, those 8 MLPs run wherever their weights live, and only the small output activations cross PCIe to be summed back into the residual stream. Throughput is gated by CPU MLP compute, not PCIe bandwidth on weight transfers.
 
 The KV cache is the other VRAM consumer. At 262144 tokens it would be ~20 GiB at FP16 — far past a 6 GiB budget. The fork's TurboQuant / TCQ KV types compress this ~5× (`turbo3_tcq` = 3.25 bpv) at ~97% of `q8_0` decode speed and constant cost across context, so KV stays GPU-resident at any context. The lossless `turbo4` (4.25 bpv, ~3.8× compression) is the safe default.
 
@@ -289,11 +289,11 @@ The repo includes `scripts/run-server.sh` to launch the server with MoE expert r
 
 # Explicit expert count, 128K context, custom port
 ./scripts/run-server.sh -m ~/models/Kimi-K2.6-UD-Q4_K_XL.gguf \
-    --n-cpu-moe 382 --ctx 128000 --port 8081 --alias Kimi-K2.6
+    --n-cpu-moe 61 --ctx 128000 --port 8081 --alias Kimi-K2.6
 
 # Tighter KV, fewer threads for a hybrid CPU
 ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
-    --n-cpu-moe 237 -ctk turbo3_tcq -ctv turbo3_tcq \
+    --n-cpu-moe 32 -ctk turbo3_tcq -ctv turbo3_tcq \
     --threads 8 --alias qwen3.6
 ```
 
@@ -307,26 +307,21 @@ Preview the composed `llama-server` command without actually starting it. Useful
 
 # With explicit overrides
 ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
-    --ctx 200000 --n-cpu-moe 200 --dry-run
+    --ctx 200000 --n-cpu-moe 32 --dry-run
 ```
 
 The script validates the model path and runs `moe-configs.py` for sizing, but skips binary validation and server launch. Exit code is 0 if sizing succeeds, 1 if the model doesn't fit the budget.
 
-### `--mlock-safe` — auto-guard against OOM
+### `--mlock` — auto-guard against OOM
 
-The `--mlock-safe` flag (enabled by default) automatically disables `--mlock` when the sizing plan shows the model doesn't fit in the RAM budget. Without this guard, `--mlock` would cause an OOM kill under memory pressure.
+`--mlock` is automatically guarded: if the sizing plan shows the model doesn't fit in the RAM budget (`fits: false` from `moe-configs.py --json`), the guard silently drops `--mlock` to prevent OOM. This is always-on — there is no flag to disable the guard.
 
-To force `--mlock` regardless of fit status, use `--mlock` without `--mlock-safe`:
+To force `--mlock` regardless of fit status, just pass `--mlock` — the guard will drop it if needed, otherwise it pins the weights.
 
 ```bash
-# Safe mode (default) — --mlock removed if fits: false
-./scripts/run-server.sh --model ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf --mlock-safe
-
-# Force --mlock (risky if RAM budget is tight)
+# Safe mode (default) — --mlock dropped if fits: false
 ./scripts/run-server.sh --model ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf --mlock
 ```
-
-The guard works by parsing `moe-configs.py --json` output and checking the `fits` field. If `fits: false`, `--mlock` is silently dropped from the command.
 
 See `./scripts/run-server.sh --help` for all options.
 
@@ -339,7 +334,7 @@ On this hardware (RTX A1000 6 GiB, 32 GiB RAM):
   -m ~/Downloads/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
   --alias qwen3.6-35b \
   --n-gpu-layers 999 \
-  --n-cpu-moe 237 \
+  --n-cpu-moe 32 \
   -ctk turbo4 \
   -ctv turbo3_tcq \
   -c 128000 \
@@ -353,10 +348,10 @@ On this hardware (RTX A1000 6 GiB, 32 GiB RAM):
 
 Key flags:
 
-- `--n-gpu-layers 999` + `--n-cpu-moe N` — every non-expert tensor on GPU, `N` experts pinned in RAM. Re-derive `N` and `-c` with `scripts/moe-configs.py` whenever model or ctx changes. The default context is 128000 tokens.
+- `--n-gpu-layers 999` + `--n-cpu-moe N` — every non-expert tensor on GPU, `N` MoE layers (with all their expert tensors) pinned in RAM. Re-derive `N` and `-c` with `scripts/moe-configs.py` whenever model or ctx changes. The default context is 128000 tokens.
 - `-ctk turbo4 -ctv turbo3_tcq` — default asymmetric KV: lossless keys (4.25 bpv), tight values (3.25 bpv TCQ). GPU-resident. **Do not use `-nkvo`.** With `-c 128000` (default), this costs ~4.6 GiB VRAM for the KV cache.
 - `-fa on` — flash attention; required for efficient quantized KV. Needs `GGML_CUDA_FA_ALL_QUANTS=ON` at build time.
-- `--fit off` — honor `--n-cpu-moe` verbatim instead of llama.cpp's auto-fit.
+- `--fit off` — pass `--n-cpu-moe` verbatim to llama.cpp instead of letting it auto-fit (which can move layers back to GPU).
 - `-np 1` — single slot; multiple slots duplicate KV state.
 - `--no-mmap` — load experts into anonymous RAM so they stay process-resident. Add `--mlock` for steady-state benchmarking (see below).
 
@@ -378,7 +373,7 @@ Verify with `cat /proc/meminfo | grep Mlocked` after start: it should jump by th
 
 ## CPU thread count (`--threads`)
 
-`--threads` sets the number of CPU worker threads used to run the expert MLPs that `--n-cpu-moe` keeps in RAM. On hybrid Intel CPUs (Alder Lake and later, including 12th–14th Gen Core and Core Ultra) **set this to the number of P-cores only**. E-cores have lower per-core throughput and a different cache hierarchy; mixing them into the same parallel MLP GEMM causes the P-cores to wait on the slowest E-core finisher every step, dropping decode tok/s. Hyper-threading siblings on the P-cores add contention for the same vector units and also hurt; one thread per P-core is the right setting.
+`--threads` sets the number of CPU worker threads used to run the expert MLPs for the layers that `--n-cpu-moe` keeps on the CPU. On hybrid Intel CPUs (Alder Lake and later, including 12th–14th Gen Core and Core Ultra) **set this to the number of P-cores only**. E-cores have lower per-core throughput and a different cache hierarchy; mixing them into the same parallel MLP GEMM causes the P-cores to wait on the slowest E-core finisher every step, dropping decode tok/s. Hyper-threading siblings on the P-cores add contention for the same vector units and also hurt; one thread per P-core is the right setting.
 
 This development host is a **13th Gen Intel Core i7-13850HX**: 8 P-cores + 12 E-cores, 28 logical threads total. Canonical setting: `--threads 8` (one per P-core).
 
@@ -422,8 +417,8 @@ All supported types with their relative costs:
 | `q5_1`         | ~1.3 | ~0.33          | ×3.0 smaller |
 | `q5_0`         | ~1.25| ~0.312         | ×3.2 smaller |
 | `q4_1`         | ~1.1 | ~0.275         | ×3.6 smaller |
-| `q4_0`         | 1.0  | 0.5            | ×4.0 smaller |
-| `iq4_nl`       | 1.0  | 0.5            | ×4.0 smaller |
+| `q4_0`         | ~0.5 | 0.25           | ×4.0 smaller |
+| `iq4_nl`       | ~0.5 | 0.25           | ×4.0 smaller |
 | `f32`          | 4.0  | 2.0            | ×0.5 (2× larger) |
 
 The `--scan` table below uses the default asymmetric pair (`turbo4`/`turbo3_tcq`). To try tighter compression, pass `--cache-type-k turbo3_tcq --cache-type-v turbo3_tcq` (symmetric turbo3, ~14% smaller KV, slightly more KLD at long context) or `--cache-type-k turbo3_tcq --cache-type-v turbo2_tcq` (aggressive, ~30% smaller than default).
@@ -440,7 +435,9 @@ During a file read (the prompt), token throughput hits ~200 tok/s. During reason
 
 Scanned with `./scripts/scan-all.sh <models-dir> --vram 6144 --ram 32768 --ctx 128000`. 30B variants run at `context_length = 40960` (model max); 35B/gemma-4 variants at `-c 128000` are well below their 262144 trained ctx — the 6 GiB VRAM budget is the binding constraint. FIT respects both the 6 GiB VRAM budget and the ~32 GiB RAM budget.
 
-The default `--ctx 128000` is a practical sweet spot for long-term focus on this hardware. At this context the KV cache (with `turbo4`/`turbo3_tcq`) costs ~4.6 GiB — leaving just enough headroom for a reasonable number of experts on GPU. This lets the model attend to multi-page documents, long codebases, and extended conversations without hitting the VRAM wall.
+The default `--ctx 128000` is a practical sweet spot for long-term focus on this hardware. At this context the KV cache (with `turbo4`/`turbo3_tcq`) costs ~4.6 GiB — leaving just enough headroom for a reasonable number of layers (and their expert tensors) on GPU.
+
+> **Note:** The `GPU/CPU` column shows `gpu_layers/cpu_layers`. For Qwen3-30B-A3B (128 layers) the values sum to 128 as expected. For Qwen3.6-35B-A3B the values (e.g. 19/237 = 256) are stale expert-count data from the pre-8067bc0 code and will be updated on re-scan. `--n-cpu-moe N` always takes a layer count.
 
 | Config | `ctx` | `max_ctx` | VRAM used | RAM used | GPU/CPU | FIT | tokens/s | tokens/s <br> @ 40K |
 |--------|------:|----------:|----------:|----------|--------:|----------|---|--------|
