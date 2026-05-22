@@ -16,7 +16,7 @@ These flags use `--spec-type` and `--spec-draft-n-max` as script options (now co
 
 Stable at 10 tokens/s, good token context +200k.
 ```bash
-run-server.sh --model Qwen3.5-122B-A10B-MTP-GGUF/Qwen3.5-122B-A10B-Q8_0-00001-of-00004.gguf --n-cpu-moe 256 -c 199936 -ctk q8_0 -ctv q8_0 --alias "Qwen3.5-122B-A10B-Q8_0" --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
+run-server.sh --model Qwen3.5-122B-A10B-MTP-GGUF/Qwen3.5-122B-A10B-Q8_0-00001-of-00004.gguf --n-cpu-moe 48 -c 262144 -ctk q8_0 -ctv q8_0 --alias "Qwen3.5-122B-A10B-MTP-Q8_0" --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
 ```
 
 ## Model
@@ -28,38 +28,38 @@ Configuration script:
 
 Configuration results:
 ```
-NOTE: Qwen3.5-122B-A10B-Q8_0.gguf: requested --ctx 262144 clamped to 201472 (VRAM-fit max=201472).
 Model:            Qwen3.5-122B-A10B-Q8_0/Qwen3.5-122B-A10B-Q8_0.gguf
 Layers:           49
 Experts (total):  256  (active per token: 8)
-Context:          201472  (model max: 262144, VRAM-fit max: 201472)
+Context:          262144  (model max: 262144, VRAM-fit max: 262144)
 
 === Tensor sizes ===
   Dense backbone:          6450.98 MiB
   All experts:           119952.00 MiB
   One expert:               468.56 MiB
-  KV cache (q8_0, eff 0.515x):    9929.97 MiB
+  KV cache (q8_0, eff 0.515x):    3164.16 MiB
 
 === VRAM plan (budget 16384 MiB) ===
   Dense backbone:          6450.98 MiB
-  KV cache:                9929.97 MiB
-  Experts on GPU (  0):       0.00 MiB
-  (precedence: dense -> KV cache (capped to fit) -> experts)
+  KV cache:                3164.16 MiB
+  Compute/MTP buffer:      4000.00 MiB
+  Experts on GPU (  1 layers,   5):    2448.00 MiB
+  (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
   -------------------------------------
-  Used:                   16380.95 MiB  ( 16.00 GiB)
-  Headroom:                   3.05 MiB
+  Used:                   16063.14 MiB  ( 15.69 GiB)
+  Headroom:                 320.86 MiB
 
 === RAM plan (budget 740000 MiB) ===
-  Experts on CPU (256):  119952.00 MiB
-  Headroom:              620048.00 MiB
+  Experts on CPU ( 48 layers, 251):  117504.00 MiB
+  Headroom:              622496.00 MiB
 
 === Verdict ===
   VRAM: OK
   RAM:  OK
-  -> Only 0 experts on GPU; per-token routing needs 8 active. On average 8 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Reduce --ctx or use a smaller quant if you need more GPU experts.
+  -> Only 5 experts on GPU; per-token routing needs 8 active. On average 3 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Offload fewer layers (--n-cpu-moe N, smaller N) to put more experts on GPU.
 
 === llama-server flag ===
-  --n-gpu-layers 999 --n-cpu-moe 256 -c 201472 -ctk q8_0 -ctv q8_0
+  --n-gpu-layers 999 --n-cpu-moe 48 -c 262144 -ctk q8_0 -ctv q8_0
 ```
 
 # References

@@ -347,13 +347,16 @@ def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> ParseRe
     #   - "qwen35moe.full_attention_interval" for Qwen3.5/3.6 MoE
     #   - "qwen3moe.full_attention_interval" for Qwen3 MoE
     #   - "attention.full_attention_interval" for other models
-    full_attn_interval = None
+    #   - absent (default to 1 = every layer stores KV).
+    full_attn_interval = 1
     for suffix in ("qwen35moe.full_attention_interval",
                    "qwen3moe.full_attention_interval",
                    "attention.full_attention_interval"):
-        full_attn_interval = field_uint(suffix, default=None)
-        if full_attn_interval is not None:
+        try:
+            full_attn_interval = field_uint(suffix)
             break
+        except (ValueError, KeyError):
+            pass
     if full_attn_interval is None or full_attn_interval < 1:
         full_attn_interval = 1
 
