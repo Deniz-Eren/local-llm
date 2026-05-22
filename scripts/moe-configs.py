@@ -135,6 +135,8 @@ class Plan:
     expert_b: float
     per_expert_b: float
     kv_b: float
+    gpu_layers: int
+    cpu_layers: int
     gpu_experts: int
     cpu_experts: int
     vram_used_b: float
@@ -142,6 +144,7 @@ class Plan:
     ram_budget_b: float
     cpu_expert_b: float
     gpu_expert_b: float
+    compute_overhead_b: float
     ctx: int
     model_max_ctx: int
     fit_max_ctx: int
@@ -150,6 +153,7 @@ class Plan:
     cache_type_v: str
     bpe_k: float
     bpe_v: float
+    experts_per_layer: int
 
     def to_dict(self, verbose: bool = False) -> dict:
         result = {
@@ -159,12 +163,16 @@ class Plan:
             "rec_ctx": self.rec_ctx,
             "vram_used_mib": round(self.vram_used_b / MIB, 2),
             "vram_headroom_mib": round((self.vram_total_b - self.vram_used_b) / MIB, 2),
+            "compute_overhead_mib": round(self.compute_overhead_b / MIB, 2),
             "cpu_expert_mib": round(self.cpu_expert_b / MIB, 2),
+            "gpu_layers": self.gpu_layers,
+            "cpu_layers": self.cpu_layers,
             "gpu_experts": self.gpu_experts,
             "cpu_experts": self.cpu_experts,
             "cache_type_k": self.cache_type_k,
             "cache_type_v": self.cache_type_v,
-            "n_cpu_moe": self.cpu_experts,
+            "n_cpu_moe": self.n_cpu_moe,
+            "experts_per_layer": self.experts_per_layer,
             "fits": self.fits,
         }
         # Task 23: add verbose fields when requested
@@ -202,7 +210,11 @@ class Plan:
 
     @property
     def n_cpu_moe(self) -> int:
-        return self.cpu_experts
+        # --n-cpu-moe always takes a **layer count**: the number of MoE layers
+        # whose expert tensors (blk.{i}.ffn_*_exps) are placed on the CPU.
+        # This is true for both shared-expert (Qwen3) and per-layer-expert
+        # (Mixtral, DeepSeek) architectures.
+        return self.cpu_layers
 
 
 # ── KV geometry dataclass ───────────────────────────────────────────────────
@@ -280,6 +292,12 @@ class ParseResult:
     expert_b: int
     model_max_ctx: int
     kv_shape: "KVShape"
+    # Number of experts per MoE layer.  For **shared-expert** Qwen3 MoE models
+    # (where all layers share the same pool), this equals the total expert
+    # count (e.g. 256).  For **per-layer-expert** models (Mixtral, etc.) it
+    # is the per-layer count (e.g. 8).  Used to convert cpu_experts into the
+    # --n-cpu-moe flag value.
+    experts_per_layer: int
 
 
 # ── parse_metadata (Task 12: returns ParseResult) ──────────────────────────
@@ -384,6 +402,17 @@ def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> ParseRe
 
     dense_b = 0
     expert_b = 0
+    # Detect experts-per-layer from tensor shapes.  The last dimension of
+    # any _exps tensor tells us how many experts each MoE layer has.
+    # For **shared-expert** Qwen3 MoE models all layers share the same pool
+    # so last_dim == total expert_count.  For **per-layer-expert** models
+    # (Mixtral, DeepSeek, …) each layer has its own smaller set (e.g. 8).
+    experts_per_layer = experts  # fallback: assume total == per-layer
+    for t in r.tensors:
+        if "_exps" in t.name and len(t.shape) > 0:
+            experts_per_layer = int(t.shape[-1])
+            break
+
     for t in r.tensors:
         if "_exps" in t.name:
             expert_b += int(t.n_bytes)
@@ -398,6 +427,7 @@ def parse_metadata(model: Path, cache_type_k: str, cache_type_v: str) -> ParseRe
         expert_b=expert_b,
         model_max_ctx=model_max_ctx,
         kv_shape=kv_shape,
+        experts_per_layer=experts_per_layer,
     )
 
 
@@ -406,10 +436,14 @@ def kv_bytes(ctx: int, kv_shape: KVShape) -> float:
 
 
 def max_fit_ctx(kv_shape: KVShape, dense_b: float,
-                vram_mib: int) -> int:
+                vram_mib: int, overhead_mib: float = 4000.0) -> int:
     """Largest context such that dense + KV fits in VRAM. KV is
-    `swa_const + ctx * full_per_tok` (linear in ctx), so closed-form."""
-    vram_for_kv_b = vram_mib * MIB - dense_b - kv_shape.swa_const_b
+    `swa_const + ctx * full_per_tok` (linear in ctx), so closed-form.
+
+    *overhead_mib* is reserved for compute buffers (FlashAttention scratch,
+    MTP draft weights, context-length spikes, etc.) and is subtracted from
+    the budget before evaluating how much space remains for the KV cache."""
+    vram_for_kv_b = (vram_mib - overhead_mib) * MIB - dense_b - kv_shape.swa_const_b
     if vram_for_kv_b <= 0:
         return 0
     if kv_shape.full_per_tok_b <= 0:
@@ -424,7 +458,8 @@ def max_fit_ctx(kv_shape: KVShape, dense_b: float,
 def make_plan(model: Path, vram_mib: int, ram_mib: int,
               ctx: int | None,
               cache_type_k: str, cache_type_v: str,
-              verbose: bool = False) -> "Plan":
+              verbose: bool = False,
+              compute_overhead_mib: float = 4000.0) -> "Plan":
     """Build a sizing Plan with this VRAM allocation precedence:
 
       1. **Dense backbone:** all non-expert tensors are placed on the GPU.
@@ -447,16 +482,22 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
 
     kv_shape = result.kv_shape
     per_expert_b = result.expert_b / result.experts
+    # Per-layer expert weight: every layer has its own named expert tensors
+    # (blk.{i}.ffn_*_exps).  Whether experts are shared across layers (Qwen3)
+    # or per-layer (Mixtral), `--n-cpu-moe` always takes a **layer count**.
+    per_layer_expert_b = result.expert_b / result.layers
 
     if verbose:
         print(f"  [verbose] model={model.name}", file=sys.stderr)
         print(f"  [verbose] dense_b={result.dense_b}  expert_b={result.expert_b}", file=sys.stderr)
-        print(f"  [verbose] per_expert_b={per_expert_b}  layers={result.layers}", file=sys.stderr)
+        print(f"  [verbose] per_expert_b={per_expert_b}  per_layer_expert_b={per_layer_expert_b}  layers={result.layers}", file=sys.stderr)
+        print(f"  [verbose] experts_per_layer={result.experts_per_layer}  (total={result.experts})", file=sys.stderr)
         print(f"  [verbose] n_full_layers={kv_shape.n_full_layers}  n_swa_layers={kv_shape.n_swa_layers}", file=sys.stderr)
         print(f"  [verbose] full_per_tok_b={kv_shape.full_per_tok_b}  swa_const_b={kv_shape.swa_const_b}", file=sys.stderr)
 
-    # Step 2a: largest ctx that fits with just the dense backbone reserved.
-    fit_ctx_raw = max_fit_ctx(kv_shape, result.dense_b, vram_mib)
+    # Step 2a: largest ctx that fits with dense backbone + compute overhead reserved.
+    overhead_b = compute_overhead_mib * MIB
+    fit_ctx_raw = max_fit_ctx(kv_shape, result.dense_b, vram_mib, compute_overhead_mib)
     fit_max_ctx = align_ctx_down(min(result.model_max_ctx, max(0, fit_ctx_raw)))
 
     if verbose:
@@ -482,34 +523,44 @@ def make_plan(model: Path, vram_mib: int, ram_mib: int,
     vram_total_b = vram_mib * MIB
     ram_budget_b = ram_mib * MIB
 
-    # Step 3: fill remaining VRAM with experts.
-    vram_after_kv_b = vram_total_b - result.dense_b - kv_b
-    if vram_after_kv_b <= 0 or per_expert_b <= 0:
-        gpu_experts = 0
+    # Step 3: fill remaining VRAM with layers, reserving space for compute
+    # buffers (FlashAttention scratch, MTP draft weights, etc.).
+    # Every layer has its own expert tensors (blk.{i}.ffn_*_exps), so VRAM
+    # per layer is expert_b / num_layers.  --n-cpu-moe takes a layer count.
+    vram_after_kv_b = vram_total_b - result.dense_b - kv_b - overhead_b
+    if vram_after_kv_b <= 0 or per_layer_expert_b <= 0:
+        gpu_layers = 0
     else:
-        gpu_experts = max(0, min(result.experts, int(vram_after_kv_b / per_expert_b)))
-    cpu_experts = result.experts - gpu_experts
+        gpu_layers = max(0, min(result.layers, int(vram_after_kv_b / per_layer_expert_b)))
+    cpu_layers = result.layers - gpu_layers
 
-    gpu_expert_b = gpu_experts * per_expert_b
-    cpu_expert_b = cpu_experts * per_expert_b
-    vram_used_b = result.dense_b + kv_b + gpu_expert_b
+    gpu_expert_b = gpu_layers * per_layer_expert_b
+    cpu_expert_b = cpu_layers * per_layer_expert_b
+
+    # Derive per-expert counts for display and RAM budget checks
+    gpu_experts = round(gpu_expert_b / per_expert_b) if per_expert_b > 0 else 0
+    cpu_experts = result.experts - gpu_experts
+    # Report includes the overhead so headroom reflects truly free VRAM.
+    vram_used_b = result.dense_b + kv_b + gpu_expert_b + overhead_b
 
     if verbose:
         print(f"  [verbose] chosen_ctx={chosen_ctx}  kv_b={kv_b}", file=sys.stderr)
-        print(f"  [verbose] vram_after_kv={vram_after_kv_b}  gpu_experts={gpu_experts}", file=sys.stderr)
+        print(f"  [verbose] vram_after_kv={vram_after_kv_b}  gpu_layers={gpu_layers}  cpu_layers={cpu_layers}", file=sys.stderr)
         print(f"  [verbose] vram_used_b={vram_used_b}", file=sys.stderr)
 
     return Plan(
         model=model, layers=result.layers, experts=result.experts, active=result.active,
         dense_b=result.dense_b, expert_b=result.expert_b, per_expert_b=per_expert_b,
-        kv_b=kv_b, gpu_experts=gpu_experts, cpu_experts=cpu_experts,
+        kv_b=kv_b, gpu_layers=gpu_layers, cpu_layers=cpu_layers,
+        gpu_experts=gpu_experts, cpu_experts=cpu_experts,
         vram_used_b=vram_used_b, vram_total_b=vram_total_b,
         ram_budget_b=ram_budget_b, cpu_expert_b=cpu_expert_b,
-        gpu_expert_b=gpu_expert_b, ctx=chosen_ctx,
+        gpu_expert_b=gpu_expert_b, compute_overhead_b=overhead_b, ctx=chosen_ctx,
         model_max_ctx=result.model_max_ctx, fit_max_ctx=fit_max_ctx, rec_ctx=rec_ctx,
         cache_type_k=cache_type_k, cache_type_v=cache_type_v,
         bpe_k=CACHE_TYPE_BPE[cache_type_k],
         bpe_v=CACHE_TYPE_BPE[cache_type_v],
+        experts_per_layer=result.experts_per_layer,
     )
 
 
@@ -543,14 +594,15 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
     print(f"=== VRAM plan (budget {vram_mib} MiB) ===")
     print(f"  Dense backbone:        {fmt_mib(p.dense_b)}")
     print(f"  KV cache:              {fmt_mib(p.kv_b)}")
-    print(f"  Experts on GPU ({p.gpu_experts:>3}):  {fmt_mib(p.gpu_expert_b)}")
-    print(f"  (precedence: dense -> KV cache (capped to fit) -> experts)")
+    print(f"  Compute/MTP buffer:    {fmt_mib(p.compute_overhead_b)}")
+    print(f"  Experts on GPU ({p.gpu_layers:>3} layers, {p.gpu_experts:>3}):  {fmt_mib(p.gpu_expert_b)}")
+    print(f"  (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)")
     print(f"  -------------------------------------")
     print(f"  Used:                  {fmt_mib(p.vram_used_b)}  ({fmt_gib(p.vram_used_b)})")
     print(f"  Headroom:              {fmt_mib(p.vram_total_b - p.vram_used_b)}")
     print()
     print(f"=== RAM plan (budget {int(p.ram_budget_b / MIB)} MiB) ===")
-    print(f"  Experts on CPU ({p.cpu_experts:>3}):  {fmt_mib(p.cpu_expert_b)}")
+    print(f"  Experts on CPU ({p.cpu_layers:>3} layers, {p.cpu_experts:>3}):  {fmt_mib(p.cpu_expert_b)}")
     print(f"  Headroom:              {fmt_mib(p.ram_budget_b - p.cpu_expert_b)}")
     print()
     print("=== Verdict ===")
@@ -565,8 +617,8 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
         print(f"  -> Only {p.gpu_experts} experts on GPU; per-token routing needs "
               f"{p.active} active. On average {p.active - p.gpu_experts} of the "
               "active expert MLPs per token will run on CPU instead of GPU "
-              "(slower per-token compute). Reduce --ctx or use a smaller quant "
-              "if you need more GPU experts.")
+              "(slower per-token compute). Offload fewer layers (--n-cpu-moe N, "
+              "smaller N) to put more experts on GPU.")
     print()
     print("=== llama-server flag ===")
     print(f"  {flag_line(p)}")
@@ -575,6 +627,7 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
 def scan_dir(scan_path: Path, vram: int, ram: int,
              ctx: int | None, quiet: bool, json_output: bool,
              cache_type_k: str, cache_type_v: str,
+             compute_overhead_mib: float,
              models_file: Path | None = None) -> int:
     if models_file is not None:
         # Read explicit model list from file (one path per line)
@@ -590,7 +643,8 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
     rows = []
     for g in ggufs:
         try:
-            p = make_plan(g, vram, ram, ctx, cache_type_k, cache_type_v)
+            p = make_plan(g, vram, ram, ctx, cache_type_k, cache_type_v,
+                          compute_overhead_mib=compute_overhead_mib)
             rows.append((g, p, None))
         except Exception as e:  # noqa: BLE001
             rows.append((g, None, str(e)))
@@ -598,17 +652,18 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
     fitting = [(g, p) for g, p, err in rows if p is not None and p.fits]
     if ctx is not None:
         # Prefer models that can reach the full requested context.
-        # Among those, prefer larger models with more GPU experts.
+        # Among those, prefer larger models with more GPU layers (the unit
+        # of MoE offload).
         fitting.sort(key=lambda gp: (
             0 if gp[1].ctx >= ctx else 1,              # can reach ctx first
             -(gp[1].dense_b + gp[1].expert_b),          # larger models first
-            gp[1].cpu_experts,                          # fewer CPU experts
+            gp[1].cpu_layers,                           # fewer CPU layers
         ))
     else:
-        # Auto mode: largest models with most GPU experts.
+        # Auto mode: largest models with most GPU layers.
         fitting.sort(key=lambda gp: (
             -(gp[1].dense_b + gp[1].expert_b),
-            gp[1].cpu_experts,
+            gp[1].cpu_layers,
         ))
     best = fitting[0] if fitting else None
 
@@ -647,7 +702,7 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
           f"k={cache_type_k}, v={cache_type_v}, ctx={ctx_label})")
     print()
     header = (f"{'MODEL'.ljust(name_w)}  {'CTX':>7}  {'MAX':>7}  "
-              f"{'VRAM used':>11}  {'RAM used':>11}  {'GPU/CPU exp':>12}  FIT  FLAG")
+              f"{'VRAM used':>11}  {'RAM used':>11}  {'GPU/CPU lay':>12}  FIT  FLAG")
     print(header)
     print("-" * len(header))
     for g, p, err in rows:
@@ -656,7 +711,7 @@ def scan_dir(scan_path: Path, vram: int, ram: int,
                   f"{'-':>11}  {'-':>12}  ERR  {err}")
             continue
         fit = "OK " if p.fits else ("vram" if not p.vram_ok else "ram ")
-        gpu_cpu = f"{p.gpu_experts}/{p.cpu_experts}"
+        gpu_cpu = f"{p.gpu_layers}/{p.cpu_layers}"
         print(f"{g.name.ljust(name_w)}  {p.ctx:>7}  {p.model_max_ctx:>7}  "
               f"{p.vram_used_b/MIB:>8.0f} MiB  {p.cpu_expert_b/MIB:>8.0f} MiB  "
               f"{gpu_cpu:>12}  {fit:>3}  {flag_line(p)}")
@@ -750,6 +805,10 @@ def main() -> int:
                     help="Path to the gguf-py directory inside an llama.cpp checkout (auto-detected if omitted)")
     ap.add_argument("--models-file", default=None,
                     help="Path to a file with one model path per line (overrides --scan glob, for --exclude filtering)")
+    ap.add_argument("--compute-overhead", type=float, default=4000.0,
+                    help="MiB to reserve for compute buffers (FlashAttention scratch, MTP draft, "
+                         "context-length spikes). Default: 4000 MiB — empirically safe for 256k "
+                         "context Qwen3 MoE on a Tesla T4. Pass 0 to disable the reserve.")
     args = ap.parse_args()
 
     # --check-avx: diagnostic only, exit immediately
@@ -782,7 +841,7 @@ def main() -> int:
         models_file = Path(args.models_file).expanduser() if args.models_file else None
         return scan_dir(scan_path, args.vram, args.ram,
                         args.ctx, args.quiet, args.json,
-                        cache_type_k, cache_type_v,
+                        cache_type_k, cache_type_v, args.compute_overhead,
                         models_file)
 
     model = Path(args.gguf).expanduser()
@@ -791,7 +850,7 @@ def main() -> int:
 
     plan = make_plan(model, args.vram, args.ram,
                      args.ctx, cache_type_k, cache_type_v,
-                     verbose=args.verbose)
+                     verbose=args.verbose, compute_overhead_mib=args.compute_overhead)
     if args.json:
         # Task 23: --json --verbose outputs JSON to stdout, verbose info to stderr
         print(json.dumps(plan.to_dict(verbose=args.verbose), indent=2))

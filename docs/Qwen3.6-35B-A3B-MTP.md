@@ -1,4 +1,4 @@
-# Qwen3.6-35B-A3B-Q8_0 — Profiling Notes
+# Qwen3.6-35B-A3B-MTP-Q8_0 — Profiling Notes
 
 For this test we use the main llama.cpp repo to utilize MTP and as such drop TurboQuant since that hasn't been merged yet.
 
@@ -29,35 +29,36 @@ Configuration script:
 Configuration results:
 ```
 Model:            Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf
-Layers:           41
+Layers:           40
 Experts (total):  256  (active per token: 8)
 Context:          262144  (model max: 262144, VRAM-fit max: 262144)
 
 === Tensor sizes ===
-  Dense backbone:          2583.45 MiB
-  All experts:            33456.00 MiB
-  One expert:               130.69 MiB
-  KV cache (q8_0, eff 0.515x):   10810.88 MiB
+  Dense backbone:          2543.10 MiB
+  All experts:            32640.00 MiB
+  One expert:               127.50 MiB
+  KV cache (q8_0, eff 0.515x):    2636.80 MiB
 
 === VRAM plan (budget 16384 MiB) ===
-  Dense backbone:          2583.45 MiB
-  KV cache:               10810.88 MiB
-  Experts on GPU ( 22):    2875.12 MiB
-  (precedence: dense -> KV cache (capped to fit) -> experts)
+  Dense backbone:          2543.10 MiB
+  KV cache:                2636.80 MiB
+  Compute/MTP buffer:      4000.00 MiB
+  Experts on GPU (  8 layers,  51):    6528.00 MiB
+  (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
   -------------------------------------
-  Used:                   16269.46 MiB  ( 15.89 GiB)
-  Headroom:                 114.54 MiB
+  Used:                   15707.90 MiB  ( 15.34 GiB)
+  Headroom:                 676.10 MiB
 
-=== RAM plan (budget 730956 MiB) ===
-  Experts on CPU (234):   30580.88 MiB
-  Headroom:              700375.12 MiB
+=== RAM plan (budget 32768 MiB) ===
+  Experts on CPU ( 32 layers, 205):   26112.00 MiB
+  Headroom:                6656.00 MiB
 
 === Verdict ===
   VRAM: OK
   RAM:  OK
 
 === llama-server flag ===
-  --n-gpu-layers 999 --n-cpu-moe 234 -c 262144 -ctk q8_0 -ctv q8_0
+  --n-gpu-layers 999 --n-cpu-moe 32 -c 262144 -ctk q8_0 -ctv q8_0
 ```
 
 # References
