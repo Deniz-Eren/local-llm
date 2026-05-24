@@ -19,6 +19,15 @@ Stable at 27 tokens/s, good token context +250k.
 run-server.sh --model Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf --n-cpu-moe 32 -c 262144 -ctk q8_0 -ctv q8_0 --alias "Qwen3.6-35B-A3B-Q8_0" --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
 ```
 
+## Alternative Variant
+
+Same architecture, different checkpoint variant (`-UD-Q4_K_M` → `--cache-type-v q4_0`).
+
+Stable at 45 tokens/s, good token context +250k.
+```bash
+run-server.sh --model Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --n-cpu-moe 24 -ctk q8_0 -ctv q4_0 -c 262144 --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
+```
+
 ## Model
 
 Configuration script:
