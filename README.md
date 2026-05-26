@@ -555,7 +555,7 @@ Open `llama_profile.nsys-rep` in NVIDIA Nsight Systems. Useful llama-server logg
 ## Real-time monitoring
 
 ```bash
-nvidia-smi dmon -s pucvmet
+watch -n 1 'nvidia-smi dmon -s pucvmet -c 1'
 ```
 
 Device monitor — live throughput and utilization without the overhead of `nsys`. Flags:
