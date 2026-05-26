@@ -535,6 +535,26 @@ sudo nsys profile -o llama_profile ./llama.cpp/build/bin/llama-server ...
 
 Open `llama_profile.nsys-rep` in NVIDIA Nsight Systems. Useful llama-server logging flags: `--perf --verbosity 4 --log-verbosity 4`.
 
+## Real-time monitoring
+
+```bash
+nvidia-smi dmon -s pucvmet
+```
+
+Device monitor — live throughput and utilization without the overhead of `nsys`. Flags:
+
+| Flag | Monitor |
+|------|---------|
+| `-p` | GPU compute utilization (%) |
+| `u` | GPU memory utilization (%) |
+| `-c` | PCIe RX bandwidth (MB/s) |
+| `-v` | PCIe TX bandwidth (MB/s) |
+| `m` | Memory clock (MHz) |
+| `e` | GPU clock (MHz) |
+| `t` | GPU temperature (°C) |
+
+Useful for spotting PCIe bottlenecks during decode — if RX/TX spikes coincide with throughput dips, expert weights are being shuffled across the bus from RAM to GPU. Run in a second terminal alongside `llama-server`.
+
 # Browser
 
 llama-server ships a built-in chat UI. Once the server is running, open `http://localhost:8080` to test the model interactively before wiring it into a coding agent.
