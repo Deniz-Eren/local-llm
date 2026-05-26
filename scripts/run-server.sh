@@ -32,6 +32,7 @@ SPEC_DRAFT_N_MAX=""
 NO_SPEC_TYPE=""
 NO_MMAP=""
 MLOCK=""
+API_KEY_FILE=""
 DRY_RUN=false
 QUIET=""
 
@@ -61,6 +62,10 @@ Options:
                           since llama-server defaults to --no-mmap; included
                           for explicitness in examples and debugging.)
   --mlock                 Pin model weights in RAM (mlock).
+  --api-key-file PATH     Path to a file containing the API key.
+                          Reads the file content (stripped of trailing
+                          whitespace/newlines) and passes it to
+                          llama-server as --api-key.
   --dry-run               Compose the full command and print it without
                           launching. Useful for debugging or pasting into
                           another terminal/screen.
@@ -130,6 +135,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)          DRY_RUN=true;      shift ;;
     --no-mmap)          NO_MMAP=1;         shift ;;
     --mlock)            MLOCK=1;           shift ;;
+    --api-key-file)     API_KEY_FILE="$2"; shift 2 ;;
     --help|-h)          usage ;;
     *)                  echo "Unknown option: $1"; usage ;;
   esac
@@ -288,6 +294,15 @@ fi
 [[ -n "$THREADS" ]]   && CMD+=(--threads "$THREADS")
 [[ -n "$NO_MMAP" ]]    && CMD+=(--no-mmap)
 [[ -n "$MLOCK" ]]      && CMD+=(--mlock)
+# API key (read from file to avoid leaking into process listing)
+if [[ -n "$API_KEY_FILE" ]]; then
+  if [[ ! -f "$API_KEY_FILE" ]]; then
+    echo "Error: api-key-file not found: $API_KEY_FILE"
+    exit 1
+  fi
+  API_KEY=$(tr -d '\n\r' < "$API_KEY_FILE")
+  [[ -n "$API_KEY" ]] && CMD+=(--api-key "$API_KEY")
+fi
 
 # ── launch ──────────────────────────────────────────────────────────────────
 # --dry-run: compose and print the command without launching
