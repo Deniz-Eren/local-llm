@@ -62,10 +62,10 @@ Options:
                           since llama-server defaults to --no-mmap; included
                           for explicitness in examples and debugging.)
   --mlock                 Pin model weights in RAM (mlock).
-  --api-key-file PATH     Path to a file containing the API key.
-                          Reads the file content (stripped of trailing
-                          whitespace/newlines) and passes it to
-                          llama-server as --api-key.
+  --api-key-file PATH     Path to a file containing API key(s).
+                          Each non-empty line is treated as a separate
+                          key; blank/whitespace-only lines are skipped.
+                          llama-server receives one --api-key per line.
   --dry-run               Compose the full command and print it without
                           launching. Useful for debugging or pasting into
                           another terminal/screen.
@@ -300,8 +300,11 @@ if [[ -n "$API_KEY_FILE" ]]; then
     echo "Error: api-key-file not found: $API_KEY_FILE"
     exit 1
   fi
-  API_KEY=$(tr -d '\n\r' < "$API_KEY_FILE")
-  [[ -n "$API_KEY" ]] && CMD+=(--api-key "$API_KEY")
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -z "$line" ]] && continue
+    CMD+=(--api-key "$line")
+  done < "$API_KEY_FILE"
 fi
 
 # ── launch ──────────────────────────────────────────────────────────────────

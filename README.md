@@ -323,16 +323,20 @@ To force `--mlock` regardless of fit status, just pass `--mlock` — the guard w
 ./scripts/run-server.sh --model ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf --mlock
 ```
 
-### `--api-key-file` — set API key from a file
+### `--api-key-file` — set API key(s) from a file
 
-Passes an API key to llama-server via `--api-key`, reading the key content from a file instead of the command line. The file's contents are stripped of trailing newlines and carriage returns before being passed. This avoids leaking the key into `ps` output or shell history.
+Passes one or more API keys to llama-server via `--api-key`, reading keys from a file instead of the command line. Each non-empty line in the file is treated as a separate key; blank lines and lines with only whitespace are ignored. This avoids leaking keys into `ps` output or shell history.
 
 ```bash
-# Write key to a file (restrict permissions)
-echo -n "my-secret-key" > ~/.llama-api-key
+# Single key — write to a file (restrict permissions)
+echo "my-secret-key" > ~/.llama-api-key
 chmod 600 ~/.llama-api-key
 
-# Pass to the server
+# Multiple keys — one per line
+printf 'key-1\nkey-2\nkey-3\n' > ~/.llama-api-keys
+chmod 600 ~/.llama-api-keys
+
+# Pass to the server (single or multiple keys)
 ./scripts/run-server.sh --model ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf --api-key-file ~/.llama-api-key
 ```
 
