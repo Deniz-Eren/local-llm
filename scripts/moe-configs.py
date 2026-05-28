@@ -114,6 +114,39 @@ CACHE_TYPE_V_DEFAULT = "turbo3_tcq"
 # upward padding past the budgeted VRAM.
 CTX_PAD = 256
 
+# ── Phase 1: PCIe Reference Matrix for Prefill (DMA Weight Streaming) ──────────────
+# Format: (label, theoretical_bandwidth_mbs)
+# PCIe 3.0 x8 (or 4.0 x4): 8,000 MB/s
+# PCIe 3.0 x16 (or 4.0 x8): 16,000 MB/s (Current baseline)
+# PCIe 4.0 x16: 32,000 MB/s
+# PCIe 5.0 x16: 64,000 MB/s
+PCIe_BANDWIDTHS = [
+    ("PCIe 3.0 x8 / 4.0 x4",  8000),
+    ("PCIe 3.0 x16 / 4.0 x8", 16000),  # baseline
+    ("PCIe 4.0 x16",            32000),
+    ("PCIe 5.0 x16",            64000),
+]
+
+# ── Phase 2: RAM Reference Matrix for Token Generation (DDR4/DDR5) ─────────────────
+# Bandwidth derived from: MT/s × 8 bytes × 2 channels
+# DDR4-2400: 38,400 MB/s
+# DDR4-3200: 51,200 MB/s (Current baseline)
+# DDR4-3600: 57,600 MB/s
+# DDR5-4800: 76,800 MB/s
+# DDR5-5600: 89,600 MB/s
+# DDR5-6000: 96,000 MB/s
+# DDR5-7200: 115,200 MB/s
+RAM_BANDWIDTHS = [
+    ("DDR4-2400", 38400),
+    ("DDR4-2666", 42656),
+    ("DDR4-3200", 51200),  # baseline
+    ("DDR4-3600", 57600),
+    ("DDR5-4800", 76800),
+    ("DDR5-5600", 89600),
+    ("DDR5-6000", 96000),
+    ("DDR5-7200",115200),
+]
+
 
 def align_ctx_down(n: int) -> int:
     """Largest multiple of CTX_PAD that is <= n, with a CTX_PAD floor."""
@@ -584,21 +617,99 @@ def flag_line(p: Plan) -> str:
             f"-ctk {p.cache_type_k} -ctv {p.cache_type_v}")
 
 
-def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
-    print(f"Model:            {p.model}")
-    print(f"Layers:           {p.layers}")
-    print(f"Experts (total):  {p.experts}  (active per token: {p.active})")
-    print(f"Context:          {p.ctx}  "
-          f"(model max: {p.model_max_ctx}, VRAM-fit max: {p.fit_max_ctx})")
+# ── Hardware Forecasting: Prefill & Generation Calibration ──────────────────────────
+
+def print_hardware_forecast(p: Plan) -> None:
+    """Print hardware performance forecasts for prefill (PCIe) and generation (RAM).
+
+    Derives model parameters from the Plan (which queried the GGUF file):
+      - Total MoE Weight Pool: p.expert_b / MIB
+      - Single Expert Weight:  p.per_expert_b / MIB
+      - Active Experts/token:  p.active
+    """
+    UBATCH = 512
+    total_expert_pool_mib = p.expert_b / MIB
+    single_expert_mib = p.per_expert_b / MIB
+    active_experts = p.active
+
     print()
-    print("=== Tensor sizes ===")
+    print("═══════════════════════════════════════════════════════════════════")
+    print("  HARDWARE FORECAST — Performance Projections")
+    print("═══════════════════════════════════════════════════════════════════")
+    print(f"  Total MoE Weight Pool:  {total_expert_pool_mib:,.2f} MiB")
+    print(f"  Single Expert Weight:   {single_expert_mib:.2f} MiB")
+    print(f"  Active Experts/token:   {active_experts}")
+    print(f"  Micro-Batch Size (ubatch): {UBATCH} tokens")
+    print()
+
+    # ── Phase 1: Prefill (PCIe DMA) ──────────────────────────────────────────
+    # Convert MB/s to MiB/s, apply efficiency, compute data per token, project t/s
+    MB_TO_MIB = 1.048576
+    PCIE_EFFICIENCY = 0.82
+
+    prefill_data_per_token_mib = total_expert_pool_mib / UBATCH
+
+    print("  ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────")
+    print(f"  Data per token (MiB):   {prefill_data_per_token_mib:,.2f}")
+    print(f"  Efficiency modifier:    {PCIE_EFFICIENCY:.0%}")
+    print()
+    header_prefill = f"  {'PCIe Config':<26}  {'Raw (MB/s)':>10}  {'Eff (MiB/s)':>11}  {'Prefill (t/s)':>12}"
+    print(header_prefill)
+    print(f"  {'-'*26}  {'-'*10}  {'-'*11}  {'-'*12}")
+
+    for label, raw_mbs in PCIe_BANDWIDTHS:
+        eff_mibs = (raw_mbs / MB_TO_MIB) * PCIE_EFFICIENCY
+        proj_tps = eff_mibs / prefill_data_per_token_mib
+        marker = " ◄ baseline" if raw_mbs == 16000 else ""
+        print(f"  {label:<26}  {raw_mbs:>10,}  {eff_mibs:>10,.0f}  {proj_tps:>11,.1f}{marker}")
+    print()
+
+    # ── Phase 2: Generation (RAM CPU Compute) ─────────────────────────────────
+    # Convert MB/s to MiB/s, apply efficiency, compute data per token, project t/s
+    RAM_EFFICIENCY = 0.45
+    generation_data_per_token_mib = active_experts * single_expert_mib
+
+    print("  ── Phase 2: Token Generation (System RAM CPU Compute) ───────────")
+    print(f"  Data per token (MiB):   {generation_data_per_token_mib:,.2f}")
+    print(f"  Efficiency modifier:    {RAM_EFFICIENCY:.0%}")
+    print()
+    header_gen = f"  {'RAM Config':<12}  {'Raw (MB/s)':>10}  {'Eff (MiB/s)':>11}  {'Gen (t/s)':>10}"
+    print(header_gen)
+    print(f"  {'-'*12}  {'-'*10}  {'-'*11}  {'-'*10}")
+
+    for label, raw_mbs in RAM_BANDWIDTHS:
+        eff_mibs = (raw_mbs / MB_TO_MIB) * RAM_EFFICIENCY
+        proj_tps = eff_mibs / generation_data_per_token_mib
+        marker = " ◄ baseline" if raw_mbs == 51200 else ""
+        print(f"  {label:<12}  {raw_mbs:>10,}  {eff_mibs:>10,.0f}  {proj_tps:>9,.1f}{marker}")
+    print()
+    print("═══════════════════════════════════════════════════════════════════")
+    print()
+
+
+def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
+    print()
+    print("═══════════════════════════════════════════════════════════════════")
+    print("  MODEL SUMMARY")
+    print("═══════════════════════════════════════════════════════════════════")
+    print(f"  Model:           {p.model}")
+    print(f"  Layers:          {p.layers}")
+    print(f"  Experts (total): {p.experts}  (active per token: {p.active})")
+    print(f"  Context:         {p.ctx}"
+          f"  (model max: {p.model_max_ctx}, VRAM-fit max: {p.fit_max_ctx})")
+    print()
+    print("═══════════════════════════════════════════════════════════════════")
+    print("  TENSOR SIZES")
+    print("═══════════════════════════════════════════════════════════════════")
     print(f"  Dense backbone:        {fmt_mib(p.dense_b)}")
     print(f"  All experts:           {fmt_mib(p.expert_b)}")
     print(f"  One expert:            {fmt_mib(p.per_expert_b)}")
     eff = p.effective_factor
     print(f"  KV cache ({p.kv_type_str}, eff {eff:.3f}x):  {fmt_mib(p.kv_b)}")
     print()
-    print(f"=== VRAM plan (budget {vram_mib} MiB) ===")
+    print("═══════════════════════════════════════════════════════════════════")
+    print(f"  VRAM PLAN — Budget: {vram_mib} MiB")
+    print("═══════════════════════════════════════════════════════════════════")
     print(f"  Dense backbone:        {fmt_mib(p.dense_b)}")
     print(f"  KV cache:              {fmt_mib(p.kv_b)}")
     print(f"  Compute/MTP buffer:    {fmt_mib(p.compute_overhead_b)}")
@@ -608,11 +719,15 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
     print(f"  Used:                  {fmt_mib(p.vram_used_b)}  ({fmt_gib(p.vram_used_b)})")
     print(f"  Headroom:              {fmt_mib(p.vram_total_b - p.vram_used_b)}")
     print()
-    print(f"=== RAM plan (budget {int(p.ram_budget_b / MIB)} MiB) ===")
+    print("═══════════════════════════════════════════════════════════════════")
+    print(f"  RAM PLAN — Budget: {int(p.ram_budget_b / MIB)} MiB")
+    print("═══════════════════════════════════════════════════════════════════")
     print(f"  Experts on CPU ({p.cpu_layers:>3} layers, {p.cpu_experts:>3}):  {fmt_mib(p.cpu_expert_b)}")
     print(f"  Headroom:              {fmt_mib(p.ram_budget_b - p.cpu_expert_b)}")
     print()
-    print("=== Verdict ===")
+    print("═══════════════════════════════════════════════════════════════════")
+    print("  VERDICT")
+    print("═══════════════════════════════════════════════════════════════════")
     print(f"  VRAM: {'OK' if p.vram_ok else 'OVER BUDGET'}")
     print(f"  RAM:  {'OK' if p.ram_ok else 'OVER BUDGET'}")
     if not p.vram_ok:
@@ -627,7 +742,9 @@ def print_full_report(p: Plan, vram_mib: int, ram_mib: int) -> None:
               "(slower per-token compute). Reduce --n-cpu-moe N to pin fewer "
               "layers to CPU, thereby keeping more layers (and their experts) on GPU.")
     print()
-    print("=== llama-server flag ===")
+    print("═══════════════════════════════════════════════════════════════════")
+    print("  LLAMA-SERVER FLAG")
+    print("═══════════════════════════════════════════════════════════════════")
     print(f"  {flag_line(p)}")
 
 
@@ -868,6 +985,7 @@ def main() -> int:
         return 0 if plan.fits else 1
 
     print_full_report(plan, args.vram, args.ram)
+    print_hardware_forecast(plan)
     return 0 if plan.fits else 1
 
 
