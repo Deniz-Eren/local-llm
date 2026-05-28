@@ -1,6 +1,4 @@
-# Qwen3.6-35B-A3B-MTP-Q8_0 — Profiling Notes
-
-For this test we use the main llama.cpp repo to utilize MTP and as such drop TurboQuant since that hasn't been merged yet.
+# Gemma-4-26B-A4B-it — Profiling Notes
 
 ## Experiment host hardware
 
@@ -10,66 +8,50 @@ For this test we use the main llama.cpp repo to utilize MTP and as such drop Tur
 | **RAM** | 740 GB | DDR4 ECC (test server) |
 | **GPU** | NVIDIA TU104-895-A1 (T4) | 16 GB GDDR6 (16384 MiB), 4096 CUDA cores, Tensor Cores ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf)) |
 
-## Final Run Command Used
+## MXFP4_MOE
 
-These flags use `--spec-type` and `--spec-draft-n-max` as script options (now configurable in `run-server.sh`).
-
-Stable at 27 tokens/s, good token context +250k.
 ```bash
-run-server.sh --model Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf --n-cpu-moe 32 -c 262144 -ctk q8_0 -ctv q8_0 --alias "Qwen3.6-35B-A3B-Q8_0" --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
+python3 scripts/moe-configs.py \
+  ~/Downloads/models/others/gemma-4-26B-A4B-it-MXFP4_MOE.gguf \
+  --vram 16384 --ram 740000 --ctx 262144
 ```
 
-## Alternative Variant
+Result:
 
-Same architecture, different checkpoint variant (`-UD-Q4_K_M` → `--cache-type-v q4_0`).
-
-Stable at 45 tokens/s, good token context +250k.
-```bash
-run-server.sh --model Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --n-cpu-moe 24 -ctk q8_0 -ctv q4_0 -c 262144 --threads 14 --no-mmap --mlock --spec-type draft-mtp --spec-draft-n-max 3
-```
-
-## Model
-
-Configuration script:
-```
-./scripts/moe-configs.py --gguf-py-path ../llama.cpp/  --vram 16384 ~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf --cache-type-k q8_0 --cache-type-v q8_0 --ctx 262144
-```
-
-Configuration results:
 ```
 ═══════════════════════════════════════════════════════════════════
   MODEL SUMMARY
 ═══════════════════════════════════════════════════════════════════
-  Model:           Qwen3.6-35B-A3B-Q8_0.gguf
-  Layers:          40
-  Experts (total): 256  (active per token: 8)
+  Model:           gemma-4-26B-A4B-it-MXFP4_MOE.gguf
+  Layers:          30
+  Experts (total): 128  (active per token: 8)
   Context:         262144  (model max: 262144, VRAM-fit max: 262144)
 
 ═══════════════════════════════════════════════════════════════════
   TENSOR SIZES
 ═══════════════════════════════════════════════════════════════════
-  Dense backbone:          2543.10 MiB
-  All experts:            32640.00 MiB
-  One expert:               127.50 MiB
-  KV cache (q8_0, eff 0.515x):    2636.80 MiB
+  Dense backbone:          2459.20 MiB
+  All experts:            13310.01 MiB
+  One expert:               103.98 MiB
+  KV cache (K=turbo4, V=turbo3_tcq, eff 0.234x):    4844.29 MiB
 
 ═══════════════════════════════════════════════════════════════════
   VRAM PLAN — Budget: 16384 MiB
 ═══════════════════════════════════════════════════════════════════
-  Dense backbone:          2543.10 MiB
-  KV cache:                2636.80 MiB
+  Dense backbone:          2459.20 MiB
+  KV cache:                4844.29 MiB
   Compute/MTP buffer:      4000.00 MiB
-  Experts on GPU (  8 layers,  51):    6528.00 MiB
+  Experts on GPU ( 11 layers,  47):    4880.34 MiB
   (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
   -------------------------------------
-  Used:                   15707.90 MiB  ( 15.34 GiB)
-  Headroom:                 676.10 MiB
+  Used:                   16183.83 MiB  ( 15.80 GiB)
+  Headroom:                 200.17 MiB
 
 ═══════════════════════════════════════════════════════════════════
-  RAM PLAN — Budget: 32768 MiB
+  RAM PLAN — Budget: 740000 MiB
 ═══════════════════════════════════════════════════════════════════
-  Experts on CPU ( 32 layers, 205):   26112.00 MiB
-  Headroom:                6656.00 MiB
+  Experts on CPU ( 19 layers,  81):    8429.68 MiB
+  Headroom:              731570.32 MiB
 
 ═══════════════════════════════════════════════════════════════════
   VERDICT
@@ -80,56 +62,52 @@ Configuration results:
 ═══════════════════════════════════════════════════════════════════
   LLAMA-SERVER FLAG
 ═══════════════════════════════════════════════════════════════════
-  --n-gpu-layers 999 --n-cpu-moe 32 -c 262144 -ctk q8_0 -ctv q8_0
+  --n-gpu-layers 999 --n-cpu-moe 19 -c 262144 -ctk turbo4 -ctv turbo3_tcq
 
 ═══════════════════════════════════════════════════════════════════
   HARDWARE FORECAST — Performance Projections
 ═══════════════════════════════════════════════════════════════════
-  Total MoE Weight Pool:  32,640.00 MiB
-  Single Expert Weight:   127.50 MiB
+  Total MoE Weight Pool:  13,310.01 MiB
+  Single Expert Weight:   103.98 MiB
   Active Experts/token:   8
   Micro-Batch Size (ubatch): 512 tokens
 
   ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────
-  Data per token (MiB):   63.75
+  Data per token (MiB):   26.00
   Efficiency modifier:    82%
 
   PCIe Config                 Raw (MB/s)  Eff (MiB/s)  Prefill (t/s)
   --------------------------  ----------  -----------  ------------
-  PCIe 3.0 x8 / 4.0 x4             8,000       6,256         98.1
-  PCIe 3.0 x16 / 4.0 x8           16,000      12,512        196.3 ◄ baseline
-  PCIe 4.0 x16                    32,000      25,024        392.5
-  PCIe 5.0 x16                    64,000      50,049        785.1
+  PCIe 3.0 x8 / 4.0 x4             8,000       6,256        240.7
+  PCIe 3.0 x16 / 4.0 x8           16,000      12,512        481.3 ◄ baseline
+  PCIe 4.0 x16                    32,000      25,024        962.6
+  PCIe 5.0 x16                    64,000      50,049      1,925.2
 
   ── Phase 2: Token Generation (System RAM CPU Compute) ───────────
-  Data per token (MiB):   1,020.00
+  Data per token (MiB):   831.88
   Efficiency modifier:    45%
 
   RAM Config    Raw (MB/s)  Eff (MiB/s)   Gen (t/s)
   ------------  ----------  -----------  ----------
-  DDR4-2400         38,400      16,479       16.2
-  DDR4-2666         42,656      18,306       17.9
-  DDR4-3200         51,200      21,973       21.5 ◄ baseline
-  DDR4-3600         57,600      24,719       24.2
-  DDR5-4800         76,800      32,959       32.3
-  DDR5-5600         89,600      38,452       37.7
-  DDR5-6000         96,000      41,199       40.4
-  DDR5-7200        115,200      49,438       48.5
+  DDR4-2400         38,400      16,479       19.8
+  DDR4-2666         42,656      18,306       22.0
+  DDR4-3200         51,200      21,973       26.4 ◄ baseline
+  DDR4-3600         57,600      24,719       29.7
+  DDR5-4800         76,800      32,959       39.6
+  DDR5-5600         89,600      38,452       46.2
+  DDR5-6000         96,000      41,199       49.5
+  DDR5-7200        115,200      49,438       59.4
 
 ═══════════════════════════════════════════════════════════════════
 ```
 
-# `--n-cpu-moe 32` pins 32 of 40 layers to CPU RAM; 8 layers on GPU. For shared-expert Qwen3.6 (256 experts across all 40 layers), 8 GPU layers ≈ 51 GPU experts.
+## Alternative Quantizations
 
-# Alternative Quantizations
-
-## Qwen3.6-35B-A3B UD-Q3_K_M
-
-Lowest quantization — smallest weights, fewest GPU experts possible.
+### UD-Q6_K_XL
 
 ```bash
 python3 scripts/moe-configs.py \
-  ~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q3_K_M.gguf \
+  ~/Downloads/models/others/gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf \
   --vram 16384 --ram 740000 --ctx 262144
 ```
 
@@ -139,133 +117,36 @@ Result:
 ═══════════════════════════════════════════════════════════════════
   MODEL SUMMARY
 ═══════════════════════════════════════════════════════════════════
-  Model:           Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q3_K_M.gguf
-  Layers:          41
-  Experts (total): 256  (active per token: 8)
+  Model:           gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf
+  Layers:          30
+  Experts (total): 128  (active per token: 8)
   Context:         262144  (model max: 262144, VRAM-fit max: 262144)
 
 ═══════════════════════════════════════════════════════════════════
   TENSOR SIZES
 ═══════════════════════════════════════════════════════════════════
-  Dense backbone:          2359.55 MiB
-  All experts:            13942.00 MiB
-  One expert:                54.46 MiB
-  KV cache (K=turbo4, V=turbo3_tcq, eff 0.234x):    1199.36 MiB
+  Dense backbone:          2459.20 MiB
+  All experts:            19741.92 MiB
+  One expert:               154.23 MiB
+  KV cache (K=turbo4, V=turbo3_tcq, eff 0.234x):    4844.29 MiB
 
 ═══════════════════════════════════════════════════════════════════
   VRAM PLAN — Budget: 16384 MiB
 ═══════════════════════════════════════════════════════════════════
-  Dense backbone:          2359.55 MiB
-  KV cache:                1199.36 MiB
+  Dense backbone:          2459.20 MiB
+  KV cache:                4844.29 MiB
   Compute/MTP buffer:      4000.00 MiB
-  Experts on GPU ( 25 layers, 156):    8501.22 MiB
+  Experts on GPU (  7 layers,  30):    4606.45 MiB
   (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
   -------------------------------------
-  Used:                   16060.13 MiB  ( 15.68 GiB)
-  Headroom:                 323.87 MiB
+  Used:                   15909.94 MiB  ( 15.54 GiB)
+  Headroom:                 474.06 MiB
 
 ═══════════════════════════════════════════════════════════════════
   RAM PLAN — Budget: 740000 MiB
 ═══════════════════════════════════════════════════════════════════
-  Experts on CPU ( 16 layers, 100):    5440.78 MiB
-  Headroom:              734559.22 MiB
-
-═══════════════════════════════════════════════════════════════════
-  VERDICT
-═══════════════════════════════════════════════════════════════════
-  VRAM: OK
-  RAM:  OK
-
-═══════════════════════════════════════════════════════════════════
-  LLAMA-SERVER FLAG
-═══════════════════════════════════════════════════════════════════
-  --n-gpu-layers 999 --n-cpu-moe 16 -c 262144 -ctk turbo4 -ctv turbo3_tcq
-
-═══════════════════════════════════════════════════════════════════
-  HARDWARE FORECAST — Performance Projections
-═══════════════════════════════════════════════════════════════════
-  Total MoE Weight Pool:  13,942.00 MiB
-  Single Expert Weight:   54.46 MiB
-  Active Experts/token:   8
-  Micro-Batch Size (ubatch): 512 tokens
-
-  ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────
-  Data per token (MiB):   27.23
-  Efficiency modifier:    82%
-
-  PCIe Config                 Raw (MB/s)  Eff (MiB/s)  Prefill (t/s)
-  --------------------------  ----------  -----------  ------------
-  PCIe 3.0 x8 / 4.0 x4             8,000       6,256        229.7
-  PCIe 3.0 x16 / 4.0 x8           16,000      12,512        459.5 ◄ baseline
-  PCIe 4.0 x16                    32,000      25,024        919.0
-  PCIe 5.0 x16                    64,000      50,049      1,838.0
-
-  ── Phase 2: Token Generation (System RAM CPU Compute) ───────────
-  Data per token (MiB):   435.69
-  Efficiency modifier:    45%
-
-  RAM Config    Raw (MB/s)  Eff (MiB/s)   Gen (t/s)
-  ------------  ----------  -----------  ----------
-  DDR4-2400         38,400      16,479       37.8
-  DDR4-2666         42,656      18,306       42.0
-  DDR4-3200         51,200      21,973       50.4 ◄ baseline
-  DDR4-3600         57,600      24,719       56.7
-  DDR5-4800         76,800      32,959       75.6
-  DDR5-5600         89,600      38,452       88.3
-  DDR5-6000         96,000      41,199       94.6
-  DDR5-7200        115,200      49,438      113.5
-
-═══════════════════════════════════════════════════════════════════
-```
-
-**Verdict:** UD-Q3_K_M puts **25 GPU layers (156 GPU experts)** — the most of any quantization. Only 16 layers on CPU. Tiny expert weights (54 MiB) mean very low data-per-token for generation (436 MiB). Predicted 50.4 t/s on DDR4-3200 — the fastest option. Trade-off: lowest fidelity.
-
-## Qwen3.6-35B-A3B UD-Q4_K_M
-
-Medium quantization — balance between fidelity and speed.
-
-```bash
-python3 scripts/moe-configs.py \
-  ~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
-  --vram 16384 --ram 740000 --ctx 262144
-```
-
-Result:
-
-```
-═══════════════════════════════════════════════════════════════════
-  MODEL SUMMARY
-═══════════════════════════════════════════════════════════════════
-  Model:           Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
-  Layers:          41
-  Experts (total): 256  (active per token: 8)
-  Context:         262144  (model max: 262144, VRAM-fit max: 262144)
-
-═══════════════════════════════════════════════════════════════════
-  TENSOR SIZES
-═══════════════════════════════════════════════════════════════════
-  Dense backbone:          2477.01 MiB
-  All experts:            19126.00 MiB
-  One expert:                74.71 MiB
-  KV cache (K=turbo4, V=turbo3_tcq, eff 0.234x):    1199.36 MiB
-
-═══════════════════════════════════════════════════════════════════
-  VRAM PLAN — Budget: 16384 MiB
-═══════════════════════════════════════════════════════════════════
-  Dense backbone:          2477.01 MiB
-  KV cache:                1199.36 MiB
-  Compute/MTP buffer:      4000.00 MiB
-  Experts on GPU ( 18 layers, 112):    8396.78 MiB
-  (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
-  -------------------------------------
-  Used:                   16073.15 MiB  ( 15.70 GiB)
-  Headroom:                 310.85 MiB
-
-═══════════════════════════════════════════════════════════════════
-  RAM PLAN — Budget: 740000 MiB
-═══════════════════════════════════════════════════════════════════
-  Experts on CPU ( 23 layers, 144):   10729.22 MiB
-  Headroom:              729270.78 MiB
+  Experts on CPU ( 23 layers,  98):   15135.47 MiB
+  Headroom:              724864.53 MiB
 
 ═══════════════════════════════════════════════════════════════════
   VERDICT
@@ -281,51 +162,143 @@ Result:
 ═══════════════════════════════════════════════════════════════════
   HARDWARE FORECAST — Performance Projections
 ═══════════════════════════════════════════════════════════════════
-  Total MoE Weight Pool:  19,126.00 MiB
-  Single Expert Weight:   74.71 MiB
+  Total MoE Weight Pool:  19,741.92 MiB
+  Single Expert Weight:   154.23 MiB
   Active Experts/token:   8
   Micro-Batch Size (ubatch): 512 tokens
 
   ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────
-  Data per token (MiB):   37.36
+  Data per token (MiB):   38.56
   Efficiency modifier:    82%
 
   PCIe Config                 Raw (MB/s)  Eff (MiB/s)  Prefill (t/s)
   --------------------------  ----------  -----------  ------------
-  PCIe 3.0 x8 / 4.0 x4             8,000       6,256        167.5
-  PCIe 3.0 x16 / 4.0 x8           16,000      12,512        334.9 ◄ baseline
-  PCIe 4.0 x16                    32,000      25,024        669.9
-  PCIe 5.0 x16                    64,000      50,049      1,339.8
+  PCIe 3.0 x8 / 4.0 x4             8,000       6,256        162.2
+  PCIe 3.0 x16 / 4.0 x8           16,000      12,512        324.5 ◄ baseline
+  PCIe 4.0 x16                    32,000      25,024        649.0
+  PCIe 5.0 x16                    64,000      50,049      1,298.0
 
   ── Phase 2: Token Generation (System RAM CPU Compute) ───────────
-  Data per token (MiB):   597.69
+  Data per token (MiB):   1,233.87
   Efficiency modifier:    45%
 
   RAM Config    Raw (MB/s)  Eff (MiB/s)   Gen (t/s)
   ------------  ----------  -----------  ----------
-  DDR4-2400         38,400      16,479       27.6
-  DDR4-2666         42,656      18,306       30.6
-  DDR4-3200         51,200      21,973       36.8 ◄ baseline
-  DDR4-3600         57,600      24,719       41.4
-  DDR5-4800         76,800      32,959       55.1
-  DDR5-5600         89,600      38,452       64.3
-  DDR5-6000         96,000      41,199       68.9
-  DDR5-7200        115,200      49,438       82.7
+  DDR4-2400         38,400      16,479       13.4
+  DDR4-2666         42,656      18,306       14.8
+  DDR4-3200         51,200      21,973       17.8 ◄ baseline
+  DDR4-3600         57,600      24,719       20.0
+  DDR5-4800         76,800      32,959       26.7
+  DDR5-5600         89,600      38,452       31.2
+  DDR5-6000         96,000      41,199       33.4
+  DDR5-7200        115,200      49,438       40.1
 
 ═══════════════════════════════════════════════════════════════════
 ```
 
-**Verdict:** UD-Q4_K_M puts **18 GPU layers (112 GPU experts)** — good balance. 23 layers on CPU. Predicted 36.8 t/s on DDR4-3200. Higher fidelity than Q3, lower than Q8_0. Good middle-ground choice.
+### UD-Q8_K_XL
+
+```bash
+python3 scripts/moe-configs.py \
+  ~/Downloads/models/others/gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf \
+  --vram 16384 --ram 740000 --ctx 262144
+```
+
+Result:
+
+```
+═══════════════════════════════════════════════════════════════════
+  MODEL SUMMARY
+═══════════════════════════════════════════════════════════════════
+  Model:           gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf
+  Layers:          30
+  Experts (total): 128  (active per token: 8)
+  Context:         262144  (model max: 262144, VRAM-fit max: 262144)
+
+═══════════════════════════════════════════════════════════════════
+  TENSOR SIZES
+═══════════════════════════════════════════════════════════════════
+  Dense backbone:          2518.98 MiB
+  All experts:            23821.89 MiB
+  One expert:               186.11 MiB
+  KV cache (K=turbo4, V=turbo3_tcq, eff 0.234x):    4844.29 MiB
+
+═══════════════════════════════════════════════════════════════════
+  VRAM PLAN — Budget: 16384 MiB
+═══════════════════════════════════════════════════════════════════
+  Dense backbone:          2518.98 MiB
+  KV cache:                4844.29 MiB
+  Compute/MTP buffer:      4000.00 MiB
+  Experts on GPU (  6 layers,  26):    4764.38 MiB
+  (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
+  -------------------------------------
+  Used:                   16127.65 MiB  ( 15.75 GiB)
+  Headroom:                 256.35 MiB
+
+═══════════════════════════════════════════════════════════════════
+  RAM PLAN — Budget: 740000 MiB
+═══════════════════════════════════════════════════════════════════
+  Experts on CPU ( 24 layers, 102):   19057.51 MiB
+  Headroom:              720942.49 MiB
+
+═══════════════════════════════════════════════════════════════════
+  VERDICT
+═══════════════════════════════════════════════════════════════════
+  VRAM: OK
+  RAM:  OK
+
+═══════════════════════════════════════════════════════════════════
+  LLAMA-SERVER FLAG
+═══════════════════════════════════════════════════════════════════
+  --n-gpu-layers 999 --n-cpu-moe 24 -c 262144 -ctk turbo4 -ctv turbo3_tcq
+
+═══════════════════════════════════════════════════════════════════
+  HARDWARE FORECAST — Performance Projections
+═══════════════════════════════════════════════════════════════════
+  Total MoE Weight Pool:  23,821.89 MiB
+  Single Expert Weight:   186.11 MiB
+  Active Experts/token:   8
+  Micro-Batch Size (ubatch): 512 tokens
+
+  ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────
+  Data per token (MiB):   46.53
+  Efficiency modifier:    82%
+
+  PCIe Config                 Raw (MB/s)  Eff (MiB/s)  Prefill (t/s)
+  --------------------------  ----------  -----------  ------------
+  PCIe 3.0 x8 / 4.0 x4             8,000       6,256        134.5
+  PCIe 3.0 x16 / 4.0 x8           16,000      12,512        268.9 ◄ baseline
+  PCIe 4.0 x16                    32,000      25,024        537.8
+  PCIe 5.0 x16                    64,000      50,049      1,075.7
+
+  ── Phase 2: Token Generation (System RAM CPU Compute) ───────────
+  Data per token (MiB):   1,488.87
+  Efficiency modifier:    45%
+
+  RAM Config    Raw (MB/s)  Eff (MiB/s)   Gen (t/s)
+  ------------  ----------  -----------  ----------
+  DDR4-2400         38,400      16,479       11.1
+  DDR4-2666         42,656      18,306       12.3
+  DDR4-3200         51,200      21,973       14.8 ◄ baseline
+  DDR4-3600         57,600      24,719       16.6
+  DDR5-4800         76,800      32,959       22.1
+  DDR5-5600         89,600      38,452       25.8
+  DDR5-6000         96,000      41,199       27.7
+  DDR5-7200        115,200      49,438       33.2
+
+═══════════════════════════════════════════════════════════════════
+```
 
 ## Comparison summary
 
 | Quant | GPU layers | GPU experts | Context | VRAM headroom | Est. t/s (DDR4-3200) |
 |-------|-----------:|------------:|--------:|--------------:|---------------------:|
-| UD-Q3_K_M | 25 | 156 | 262K | 324 MiB | 50.4 |
-| UD-Q4_K_M | 18 | 112 | 262K | 311 MiB | 36.8 |
-| Q8_0 | 8 | 51 | 262K | 676 MiB | 21.5 |
+| MXFP4_MOE | 11 | 47 | 262K | 200 MiB | 26.4 |
+| UD-Q6_K_XL | 7 | 30 | 262K | 474 MiB | 17.8 |
+| UD-Q8_K_XL | 6 | 26 | 262K | 256 MiB | 14.8 |
 
-# References
+**Verdict:** Gemma-4-26B-A4B-it fits well on 16 GiB VRAM with all quantizations. MXFP4_MOE offers the best balance — 11 GPU layers and 26 t/s. The UD-Q6_K_XL has the most VRAM headroom (474 MiB) but slower generation. All use the smaller turboKV cache (4844 MiB at 262K) thanks to Gemma 4's different attention pattern compared to Qwen3.
 
-- Qwen3.6 35B-A3B MTP GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF
-- Qwen3.6 35B-A3B standard GGUFs: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
+## References
+
+- Gemma-4 GGUFs: https://huggingface.co/unsloth

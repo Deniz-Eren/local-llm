@@ -28,18 +28,25 @@ Configuration script:
 
 Configuration results:
 ```
-Model:            Qwen3.5-122B-A10B-Q8_0/Qwen3.5-122B-A10B-Q8_0.gguf
-Layers:           49
-Experts (total):  256  (active per token: 8)
-Context:          262144  (model max: 262144, VRAM-fit max: 262144)
+═══════════════════════════════════════════════════════════════════
+  MODEL SUMMARY
+═══════════════════════════════════════════════════════════════════
+  Model:           Qwen3.5-122B-A10B-MTP-GGUF/Qwen3.5-122B-A10B-Q8_0.gguf
+  Layers:          49
+  Experts (total): 256  (active per token: 8)
+  Context:         262144  (model max: 262144, VRAM-fit max: 262144)
 
-=== Tensor sizes ===
+═══════════════════════════════════════════════════════════════════
+  TENSOR SIZES
+═══════════════════════════════════════════════════════════════════
   Dense backbone:          6450.98 MiB
   All experts:           119952.00 MiB
   One expert:               468.56 MiB
   KV cache (q8_0, eff 0.515x):    3164.16 MiB
 
-=== VRAM plan (budget 16384 MiB) ===
+═══════════════════════════════════════════════════════════════════
+  VRAM PLAN — Budget: 16384 MiB
+═══════════════════════════════════════════════════════════════════
   Dense backbone:          6450.98 MiB
   KV cache:                3164.16 MiB
   Compute/MTP buffer:      4000.00 MiB
@@ -49,17 +56,59 @@ Context:          262144  (model max: 262144, VRAM-fit max: 262144)
   Used:                   16063.14 MiB  ( 15.69 GiB)
   Headroom:                 320.86 MiB
 
-=== RAM plan (budget 740000 MiB) ===
+═══════════════════════════════════════════════════════════════════
+  RAM PLAN — Budget: 740000 MiB
+═══════════════════════════════════════════════════════════════════
   Experts on CPU ( 48 layers, 251):  117504.00 MiB
   Headroom:              622496.00 MiB
 
-=== Verdict ===
+═══════════════════════════════════════════════════════════════════
+  VERDICT
+═══════════════════════════════════════════════════════════════════
   VRAM: OK
   RAM:  OK
-  -> Only 5 layers (40 experts) on GPU; per-token routing needs 8 active. On average 3 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Offload fewer layers (`--n-cpu-moe N`, smaller `N`) to put more layers — and more experts — on GPU.
+  -> Only 5 experts on GPU; per-token routing needs 8 active. On average 3 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Reduce --n-cpu-moe N to pin fewer layers to CPU, thereby keeping more layers (and their experts) on GPU.
 
-=== llama-server flag ===
+═══════════════════════════════════════════════════════════════════
+  LLAMA-SERVER FLAG
+═══════════════════════════════════════════════════════════════════
   --n-gpu-layers 999 --n-cpu-moe 48 -c 262144 -ctk q8_0 -ctv q8_0
+
+═══════════════════════════════════════════════════════════════════
+  HARDWARE FORECAST — Performance Projections
+═══════════════════════════════════════════════════════════════════
+  Total MoE Weight Pool:  119,952.00 MiB
+  Single Expert Weight:   468.56 MiB
+  Active Experts/token:   8
+  Micro-Batch Size (ubatch): 512 tokens
+
+  ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────
+  Data per token (MiB):   234.28
+  Efficiency modifier:    82%
+
+  PCIe Config                 Raw (MB/s)  Eff (MiB/s)  Prefill (t/s)
+  --------------------------  ----------  -----------  ------------
+  PCIe 3.0 x8 / 4.0 x4             8,000       6,256         26.7
+  PCIe 3.0 x16 / 4.0 x8           16,000      12,512         53.4 ◄ baseline
+  PCIe 4.0 x16                    32,000      25,024        106.8
+  PCIe 5.0 x16                    64,000      50,049        213.6
+
+  ── Phase 2: Token Generation (System RAM CPU Compute) ───────────
+  Data per token (MiB):   3,748.50
+  Efficiency modifier:    45%
+
+  RAM Config    Raw (MB/s)  Eff (MiB/s)   Gen (t/s)
+  ------------  ----------  -----------  ----------
+  DDR4-2400         38,400      16,479        4.4
+  DDR4-2666         42,656      18,306        4.9
+  DDR4-3200         51,200      21,973        5.9 ◄ baseline
+  DDR4-3600         57,600      24,719        6.6
+  DDR5-4800         76,800      32,959        8.8
+  DDR5-5600         89,600      38,452       10.3
+  DDR5-6000         96,000      41,199       11.0
+  DDR5-7200        115,200      49,438       13.2
+
+═══════════════════════════════════════════════════════════════════
 ```
 
 # References

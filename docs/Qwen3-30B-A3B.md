@@ -1,6 +1,4 @@
-# MiniMax M2.7 — Profiling Notes
-
-MiniMax M2.7 is a sparse MoE model much larger than the Qwen3.6 family. We are profiling its fit across different host platforms.
+# Qwen3-30B-A3B — Profiling Notes
 
 ## Experiment host hardware
 
@@ -10,210 +8,207 @@ MiniMax M2.7 is a sparse MoE model much larger than the Qwen3.6 family. We are p
 | **RAM** | 740 GB | DDR4 ECC (test server) |
 | **GPU** | NVIDIA TU104-895-A1 (T4) | 16 GB GDDR6 (16384 MiB), 4096 CUDA cores, Tensor Cores ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf)) |
 
-## Final Run Command Used
-
-Worked but unusable at 3-4 tokens/s, good token context +128k but tool calls regularly failed for unknown reasons:
-```bash
-run-server.sh --model MiniMax-M2.7-Q8_0.gguf --n-cpu-moe 62 -c 92416 -ctk q8_0 -ctv q4_0 --alias "MiniMax-M2.7-Q8_0" --threads 14 --no-mmap --mlock
-```
-
-## Model
-
-Configuration script:
-```
-./scripts/moe-configs.py ~/models/MiniMax-M2.7-GGUF/Q8_0/MiniMax-M2.7-Q8_0.gguf --ctx 196608 --vram 16384 --ram 740000 --cache-type-k q8_0 --cache-type-v q4_0 --compute-overhead 3600
-```
-
-Configuration results:
-```
-NOTE: MiniMax-M2.7-Q8_0.gguf: requested --ctx 196608 clamped to 92416 (VRAM-fit max=92416).
-
-═══════════════════════════════════════════════════════════════════
-  MODEL SUMMARY
-═══════════════════════════════════════════════════════════════════
-  Model:           MiniMax-M2.7-GGUF/Q8_0/MiniMax-M2.7-Q8_0.gguf
-  Layers:          62
-  Experts (total): 256  (active per token: 8)
-  Context:         92416  (model max: 196608, VRAM-fit max: 92416)
-
-═══════════════════════════════════════════════════════════════════
-  TENSOR SIZES
-═══════════════════════════════════════════════════════════════════
-  Dense backbone:          4201.49 MiB
-  All experts:           227664.00 MiB
-  One expert:               889.31 MiB
-  KV cache (K=q8_0, V=q4_0, eff 0.383x):    8561.11 MiB
-
-═══════════════════════════════════════════════════════════════════
-  VRAM PLAN — Budget: 16384 MiB
-═══════════════════════════════════════════════════════════════════
-  Dense backbone:          4201.49 MiB
-  KV cache:                8561.11 MiB
-  Compute/MTP buffer:      3600.00 MiB
-  Experts on GPU (  0 layers,   0):       0.00 MiB
-  (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
-  -------------------------------------
-  Used:                   16362.60 MiB  ( 15.98 GiB)
-  Headroom:                  21.40 MiB
-
-═══════════════════════════════════════════════════════════════════
-  RAM PLAN — Budget: 740000 MiB
-═══════════════════════════════════════════════════════════════════
-  Experts on CPU ( 62 layers, 256):  227664.00 MiB
-  Headroom:              512336.00 MiB
-
-═══════════════════════════════════════════════════════════════════
-  VERDICT
-═══════════════════════════════════════════════════════════════════
-  VRAM: OK
-  RAM:  OK
-  -> Only 0 experts on GPU; per-token routing needs 8 active. On average 8 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Reduce --n-cpu-moe N to pin fewer layers to CPU, thereby keeping more layers (and their experts) on GPU.
-
-═══════════════════════════════════════════════════════════════════
-  LLAMA-SERVER FLAG
-═══════════════════════════════════════════════════════════════════
-  --n-gpu-layers 999 --n-cpu-moe 62 -c 92416 -ctk q8_0 -ctv q4_0
-
-═══════════════════════════════════════════════════════════════════
-  HARDWARE FORECAST — Performance Projections
-═══════════════════════════════════════════════════════════════════
-  Total MoE Weight Pool:  227,664.00 MiB
-  Single Expert Weight:   889.31 MiB
-  Active Experts/token:   8
-  Micro-Batch Size (ubatch): 512 tokens
-
-  ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────
-  Data per token (MiB):   444.66
-  Efficiency modifier:    82%
-
-  PCIe Config                 Raw (MB/s)  Eff (MiB/s)  Prefill (t/s)
-  --------------------------  ----------  -----------  ------------
-  PCIe 3.0 x8 / 4.0 x4             8,000       6,256         14.1
-  PCIe 3.0 x16 / 4.0 x8           16,000      12,512         28.1 ◄ baseline
-  PCIe 4.0 x16                    32,000      25,024         56.3
-  PCIe 5.0 x16                    64,000      50,049        112.6
-
-  ── Phase 2: Token Generation (System RAM CPU Compute) ───────────
-  Data per token (MiB):   7,114.50
-  Efficiency modifier:    45%
-
-  RAM Config    Raw (MB/s)  Eff (MiB/s)   Gen (t/s)
-  ------------  ----------  -----------  ----------
-  DDR4-2400         38,400      16,479        2.3
-  DDR4-2666         42,656      18,306        2.6
-  DDR4-3200         51,200      21,973        3.1 ◄ baseline
-  DDR4-3600         57,600      24,719        3.5
-  DDR5-4800         76,800      32,959        4.6
-  DDR5-5600         89,600      38,452        5.4
-  DDR5-6000         96,000      41,199        5.8
-  DDR5-7200        115,200      49,438        6.9
-
-═══════════════════════════════════════════════════════════════════
-```
-
-# Alternative Quantization
-
-## MiniMax M2.7 UD-Q4_K_XL
-
-Lower-fidelity quantization with smaller expert weights (~508 MiB vs 889 MiB each).
+## Q2_K
 
 ```bash
 python3 scripts/moe-configs.py \
-  ~/models/MiniMax-M2.7-GGUF/UD-Q4_K_XL/MiniMax-M2.7-UD-Q4_K_XL.gguf \
-  --ctx 196608 --vram 16384 --ram 740000 \
-  --cache-type-k turbo3_tcq --cache-type-v turbo3_tcq
+  ~/Downloads/models/others/Qwen3-30B-A3B-Q2_K.gguf \
+  --vram 16384 --ram 740000 --ctx 262144
 ```
 
 Result:
 
 ```
-NOTE: MiniMax-M2.7-UD-Q4_K_XL.gguf: requested --ctx 196608 clamped to 166400 (VRAM-fit max=166400).
+NOTE: Qwen3-30B-A3B-Q2_K.gguf: requested --ctx 262144 clamped to 40960 (model_max_ctx=40960).
 
 ═══════════════════════════════════════════════════════════════════
   MODEL SUMMARY
 ═══════════════════════════════════════════════════════════════════
-  Model:           MiniMax-M2.7-GGUF/UD-Q4_K_XL/MiniMax-M2.7-UD-Q4_K_XL.gguf
-  Layers:          62
-  Experts (total): 256  (active per token: 8)
-  Context:         166400  (model max: 196608, VRAM-fit max: 166400)
+  Model:           Qwen3-30B-A3B-Q2_K.gguf
+  Layers:          48
+  Experts (total): 128  (active per token: 8)
+  Context:         40960  (model max: 40960, VRAM-fit max: 40960)
 
 ═══════════════════════════════════════════════════════════════════
   TENSOR SIZES
 ═══════════════════════════════════════════════════════════════════
-  Dense backbone:          4201.49 MiB
-  All experts:           130050.00 MiB
-  One expert:               508.01 MiB
-  KV cache (turbo3_tcq, eff 0.203x):    8180.90 MiB
+  Dense backbone:           723.35 MiB
+  All experts:            10008.00 MiB
+  One expert:                78.19 MiB
+  KV cache (K=turbo4, V=turbo3_tcq, eff 0.234x):     899.52 MiB
 
 ═══════════════════════════════════════════════════════════════════
   VRAM PLAN — Budget: 16384 MiB
 ═══════════════════════════════════════════════════════════════════
-  Dense backbone:          4201.49 MiB
-  KV cache:                8180.90 MiB
+  Dense backbone:           723.35 MiB
+  KV cache:                 899.52 MiB
   Compute/MTP buffer:      4000.00 MiB
-  Experts on GPU (  0 layers,   0):       0.00 MiB
+  Experts on GPU ( 48 layers, 128):   10008.00 MiB
   (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
   -------------------------------------
-  Used:                   16382.39 MiB  ( 16.00 GiB)
-  Headroom:                   1.61 MiB
+  Used:                   15630.87 MiB  ( 15.26 GiB)
+  Headroom:                 753.13 MiB
 
 ═══════════════════════════════════════════════════════════════════
   RAM PLAN — Budget: 740000 MiB
 ═══════════════════════════════════════════════════════════════════
-  Experts on CPU ( 62 layers, 256):  130050.00 MiB
-  Headroom:              609950.00 MiB
+  Experts on CPU (  0 layers,   0):       0.00 MiB
+  Headroom:              740000.00 MiB
 
 ═══════════════════════════════════════════════════════════════════
   VERDICT
 ═══════════════════════════════════════════════════════════════════
   VRAM: OK
   RAM:  OK
-  -> Only 0 experts on GPU; per-token routing needs 8 active. On average 8 of the active expert MLPs per token will run on CPU instead of GPU (slower per-token compute). Reduce --n-cpu-moe N to pin fewer layers to CPU, thereby keeping more layers (and their experts) on GPU.
 
 ═══════════════════════════════════════════════════════════════════
   LLAMA-SERVER FLAG
 ═══════════════════════════════════════════════════════════════════
-  --n-gpu-layers 999 --n-cpu-moe 62 -c 166400 -ctk turbo3_tcq -ctv turbo3_tcq
+  --n-gpu-layers 999 --n-cpu-moe 0 -c 40960 -ctk turbo4 -ctv turbo3_tcq
 
 ═══════════════════════════════════════════════════════════════════
   HARDWARE FORECAST — Performance Projections
 ═══════════════════════════════════════════════════════════════════
-  Total MoE Weight Pool:  130,050.00 MiB
-  Single Expert Weight:   508.01 MiB
+  Total MoE Weight Pool:  10,008.00 MiB
+  Single Expert Weight:   78.19 MiB
   Active Experts/token:   8
   Micro-Batch Size (ubatch): 512 tokens
 
   ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────
-  Data per token (MiB):   254.00
+  Data per token (MiB):   19.55
   Efficiency modifier:    82%
 
   PCIe Config                 Raw (MB/s)  Eff (MiB/s)  Prefill (t/s)
   --------------------------  ----------  -----------  ------------
-  PCIe 3.0 x8 / 4.0 x4             8,000       6,256         24.6
-  PCIe 3.0 x16 / 4.0 x8           16,000      12,512         49.3 ◄ baseline
-  PCIe 4.0 x16                    32,000      25,024         98.5
-  PCIe 5.0 x16                    64,000      50,049        197.0
+  PCIe 3.0 x8 / 4.0 x4             8,000       6,256        320.1
+  PCIe 3.0 x16 / 4.0 x8           16,000      12,512        640.1 ◄ baseline
+  PCIe 4.0 x16                    32,000      25,024      1,280.2
+  PCIe 5.0 x16                    64,000      50,049      2,560.5
 
   ── Phase 2: Token Generation (System RAM CPU Compute) ───────────
-  Data per token (MiB):   4,064.06
+  Data per token (MiB):   625.50
   Efficiency modifier:    45%
 
   RAM Config    Raw (MB/s)  Eff (MiB/s)   Gen (t/s)
   ------------  ----------  -----------  ----------
-  DDR4-2400         38,400      16,479        4.1
-  DDR4-2666         42,656      18,306        4.5
-  DDR4-3200         51,200      21,973        5.4 ◄ baseline
-  DDR4-3600         57,600      24,719        6.1
-  DDR5-4800         76,800      32,959        8.1
-  DDR5-5600         89,600      38,452        9.5
-  DDR5-6000         96,000      41,199       10.1
-  DDR5-7200        115,200      49,438       12.2
+  DDR4-2400         38,400      16,479       26.3
+  DDR4-2666         42,656      18,306       29.3
+  DDR4-3200         51,200      21,973       35.1 ◄ baseline
+  DDR4-3600         57,600      24,719       39.5
+  DDR5-4800         76,800      32,959       52.7
+  DDR5-5600         89,600      38,452       61.5
+  DDR5-6000         96,000      41,199       65.9
+  DDR5-7200        115,200      49,438       79.0
 
 ═══════════════════════════════════════════════════════════════════
 ```
 
-**Verdict:** UD-Q4_K_XL fits with 1.61 MiB headroom at 166K context. All 62 layers on CPU. Smaller expert weights (~508 MiB vs 889 MiB for Q8_0) mean less RAM used (130 GiB vs 228 GiB), but same 0 GPU experts. Slightly higher generation speed (5.4 t/s vs 3.1 t/s on DDR4-3200) due to smaller data per token for CPU expert routing.
+## Alternative Quantization: Q3_K_S
 
-# References
+```bash
+python3 scripts/moe-configs.py \
+  ~/Downloads/models/others/Qwen3-30B-A3B-Q3_K_S.gguf \
+  --vram 16384 --ram 740000 --ctx 262144
+```
 
-- MiniMax-M2.7 229B GGUFs: https://huggingface.co/unsloth/MiniMax-M2.7-GGUF
+Result:
+
+```
+NOTE: Qwen3-30B-A3B-Q3_K_S.gguf: requested --ctx 262144 clamped to 40960 (model_max_ctx=40960).
+
+═══════════════════════════════════════════════════════════════════
+  MODEL SUMMARY
+═══════════════════════════════════════════════════════════════════
+  Model:           Qwen3-30B-A3B-Q3_K_S.gguf
+  Layers:          48
+  Experts (total): 128  (active per token: 8)
+  Context:         40960  (model max: 40960, VRAM-fit max: 40960)
+
+═══════════════════════════════════════════════════════════════════
+  TENSOR SIZES
+═══════════════════════════════════════════════════════════════════
+  Dense backbone:           790.99 MiB
+  All experts:            11880.00 MiB
+  One expert:                92.81 MiB
+  KV cache (K=turbo4, V=turbo3_tcq, eff 0.234x):     899.52 MiB
+
+═══════════════════════════════════════════════════════════════════
+  VRAM PLAN — Budget: 16384 MiB
+═══════════════════════════════════════════════════════════════════
+  Dense backbone:           790.99 MiB
+  KV cache:                 899.52 MiB
+  Compute/MTP buffer:      4000.00 MiB
+  Experts on GPU ( 43 layers, 115):   10642.50 MiB
+  (precedence: dense -> KV cache (capped to fit) -> experts layer-by-layer)
+  -------------------------------------
+  Used:                   16333.01 MiB  ( 15.95 GiB)
+  Headroom:                  50.99 MiB
+
+═══════════════════════════════════════════════════════════════════
+  RAM PLAN — Budget: 740000 MiB
+═══════════════════════════════════════════════════════════════════
+  Experts on CPU (  5 layers,  13):    1237.50 MiB
+  Headroom:              738762.50 MiB
+
+═══════════════════════════════════════════════════════════════════
+  VERDICT
+═══════════════════════════════════════════════════════════════════
+  VRAM: OK
+  RAM:  OK
+
+═══════════════════════════════════════════════════════════════════
+  LLAMA-SERVER FLAG
+═══════════════════════════════════════════════════════════════════
+  --n-gpu-layers 999 --n-cpu-moe 5 -c 40960 -ctk turbo4 -ctv turbo3_tcq
+
+═══════════════════════════════════════════════════════════════════
+  HARDWARE FORECAST — Performance Projections
+═══════════════════════════════════════════════════════════════════
+  Total MoE Weight Pool:  11,880.00 MiB
+  Single Expert Weight:   92.81 MiB
+  Active Experts/token:   8
+  Micro-Batch Size (ubatch): 512 tokens
+
+  ── Phase 1: Prefill (PCIe DMA Weight Streaming) ─────────────────
+  Data per token (MiB):   23.20
+  Efficiency modifier:    82%
+
+  PCIe Config                 Raw (MB/s)  Eff (MiB/s)  Prefill (t/s)
+  --------------------------  ----------  -----------  ------------
+  PCIe 3.0 x8 / 4.0 x4             8,000       6,256        269.6
+  PCIe 3.0 x16 / 4.0 x8           16,000      12,512        539.2 ◄ baseline
+  PCIe 4.0 x16                    32,000      25,024      1,078.5
+  PCIe 5.0 x16                    64,000      50,049      2,157.0
+
+  ── Phase 2: Token Generation (System RAM CPU Compute) ───────────
+  Data per token (MiB):   742.50
+  Efficiency modifier:    45%
+
+  RAM Config    Raw (MB/s)  Eff (MiB/s)   Gen (t/s)
+  ------------  ----------  -----------  ----------
+  DDR4-2400         38,400      16,479       22.2
+  DDR4-2666         42,656      18,306       24.7
+  DDR4-3200         51,200      21,973       29.6 ◄ baseline
+  DDR4-3600         57,600      24,719       33.3
+  DDR5-4800         76,800      32,959       44.4
+  DDR5-5600         89,600      38,452       51.8
+  DDR5-6000         96,000      41,199       55.5
+  DDR5-7200        115,200      49,438       66.6
+
+═══════════════════════════════════════════════════════════════════
+```
+
+## Comparison summary
+
+| Quant | GPU layers | GPU experts | Context | VRAM headroom | Est. t/s (DDR4-3200) |
+|-------|-----------:|------------:|--------:|--------------:|---------------------:|
+| **Q2_K** | 48 (all) | 128 (all) | 40K | 753 MiB | 35.1 |
+| **Q3_K_S** | 43 | 115 | 40K | 51 MiB | 29.6 |
+
+**Verdict:** Qwen3-30B-A3B is a **perfect fit** on 16 GiB VRAM. The Q2_K quantization puts all 48 layers (128 experts) on GPU — zero CPU expert routing. Extremely fast at 35 t/s with 40K context. Q3_K_S is also viable but very tight (51 MiB headroom) with 5 layers on CPU.
+
+Note: Qwen3-30B-A3B has a model max context of only 40960 tokens (unlike Qwen3.6-35B-A3B at 262K). This is the primary trade-off vs the larger context models.
+
+## References
+
+- Qwen3 MoE GGUFs: https://huggingface.co/unsloth/Qwen3-MoE-GGUF
