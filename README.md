@@ -388,6 +388,30 @@ Without locking, the kernel can evict CPU-side experts under memory pressure, ca
 
 Verify with `cat /proc/meminfo | grep Mlocked` after start: it should jump by the model's on-disk size. If not, `mlock()` is being silently denied — usually a `ulimit -l` set in a different shell. Raise via `ulimit -l <KiB>` (as root, in the same shell) or permanently via `memlock` in `/etc/security/limits.conf`.
 
+## CPU frequency scaling
+
+llama.cpp's CPU expert MLPs are compute-bound — decode throughput scales linearly with clock speed. On most Linux systems the scheduler defaults to a power-saving governor that throttles P-cores down to 800 MHz when idle, and only boosts when load is detected. With MoE, the GPU finishes its step and then idles while the CPU computes expert MLPs — the load profile can be irregular enough that the governor never fully boosts, leaving cores pinned near the minimum frequency. Check your actual clock before benchmarking:
+
+```bash
+cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq | sort -u
+```
+
+If you see anything under 3000000 (3 GHz), set the governor to performance mode to lock cores at boost:
+
+```bash
+sudo cpupower frequency-set -g performance
+```
+
+On the i7-13850HX development host, P-cores boost to 5100–5300 MHz. Running at 800 MHz is ~15% of peak; the token throughput scales proportionally. Verify the change took effect by checking `scaling_cur_freq` again — you should see ~5000000+.
+
+For a permanent fix, add a `systemd` service or udev rule to set the governor at boot:
+
+```bash
+sudo systemctl enable cpupower
+# /etc/default/cpupower:
+GOVERNOR="performance"
+```
+
 ## CPU thread count (`--threads`)
 
 `--threads` sets the number of CPU worker threads used to run the expert MLPs for the layers that `--n-cpu-moe` keeps on the CPU. On hybrid Intel CPUs (Alder Lake and later, including 12th–14th Gen Core and Core Ultra) **set this to the number of P-cores only**. E-cores have lower per-core throughput and a different cache hierarchy; mixing them into the same parallel MLP GEMM causes the P-cores to wait on the slowest E-core finisher every step, dropping decode tok/s. Hyper-threading siblings on the P-cores add contention for the same vector units and also hurt; one thread per P-core is the right setting.
