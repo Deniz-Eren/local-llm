@@ -407,6 +407,131 @@ For any other CPU, look up the **physical core count specifically** (not logical
 
 Pinning helps too: `taskset -c 0-7 ./llama-server ...` (or the P-core CPU-list from `lscpu --extended`) keeps the scheduler from migrating workers onto E-cores or HT siblings under load.
 
+## CPU pinning with `taskset`
+
+On hybrid CPUs, thread placement matters as much as thread count. The Linux scheduler may migrate workers across P-cores, E-cores, and SMT siblings — each migration carries a cache-warmth penalty and can shift memory NUMA behavior on multi-socket boxes. `taskset` pins the process to a fixed CPU set at launch, eliminating migration and giving llama.cpp deterministic thread-to-core mapping.
+
+### Inspecting CPU topology
+
+Start by mapping logical CPU IDs to their physical role. Use `lscpu -e` to see the full layout:
+
+```bash
+lscpu -e
+```
+
+On this development host (Intel Core i7-13850HX, 13th Gen), the output looks like:
+
+```
+CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ       MHZ
+  0    0      0    0 0:0:0:0          yes 5100.0000 800.0000  796.6600
+  1    0      0    0 0:0:0:0          yes 5100.0000 800.0000  800.0000
+  2    0      0    1 4:4:1:0          yes 5100.0000 800.0000 1568.5400
+  3    0      0    1 4:4:1:0          yes 5100.0000 800.0000 1583.7581
+  4    0      0    2 8:8:2:0          yes 5100.0000 800.0000 1176.7590
+  5    0      0    2 8:8:2:0          yes 5100.0000 800.0000  800.0000
+  6    0      0    3 12:12:3:0        yes 5100.0000 800.0000 1300.3870
+  7    0      0    3 12:12:3:0        yes 5100.0000 800.0000  800.0000
+  8    0      0    4 16:16:4:0        yes 5300.0000 800.0000 1115.6700
+  9    0      0    4 16:16:4:0        yes 5300.0000 800.0000  800.0000
+ 10    0      0    5 20:20:5:0        yes 5300.0000 800.0000 1723.0551
+ 11    0      0    5 20:20:5:0        yes 5300.0000 800.0000  800.0000
+ 12    0      0    6 24:24:6:0        yes 5100.0000 800.0000  935.7420
+ 13    0      0    6 24:24:6:0        yes 5100.0000 800.0000  800.0000
+ 14    0      0    7 28:28:7:0        yes 5100.0000 800.0000 1189.8051
+ 15    0      0    7 28:28:7:0        yes 5100.0000 800.0000  800.0000
+ 16    0      0    8 36:36:9:0        yes 3800.0000 800.0000 1593.8831
+ 17    0      0    9 37:37:9:0        yes 3800.0000 800.0000  800.0000
+ ...
+ 27    0      0   19 47:47:11:0       yes 3800.0000 800.0000  800.0000
+```
+
+Interpret the columns:
+
+- **CPU** — logical thread ID that Linux uses for scheduling and `taskset`.
+- **CORE** — physical core number. Threads sharing the same CORE value are SMT (hyper-threading) siblings.
+- **MAXMHZ / MINMHZ** — the P-core E-core clock split is visible: CPUs 0–15 cap at 5100–5300 MHz (P-cores), CPUs 16–27 cap at 3800 MHz (E-cores).
+- **MHZ** — current frequency; notice P-cores 0 and 5 sit near the 800 MHz minimum while siblings 2 and 10 are clocking higher, showing scheduler-driven frequency variation.
+
+Mapping:
+
+| CPU range | Role | Count |
+|-----------|------|-------|
+| 0–15 | Performance cores (8 physical × 2 SMT threads) | 8 P-cores |
+| 16–27 | Efficiency cores (12 physical, no SMT) | 12 E-cores |
+| 0–27 | Total logical threads | 28 |
+
+### Selecting the optimal CPU set
+
+For `--threads 8` (one per P-core), pick exactly one thread from each SMT pair to avoid sharing vector execution units:
+
+```bash
+taskset -c 0,2,4,6,8,10,12,14 ./llama.cpp/build/bin/llama-server ...
+```
+
+This selects the even-numbered thread from each P-core pair (cores 0 through 7). The alternative odd set `1,3,5,7,9,11,13,15` is equivalent — pick one and stick with it.
+
+**Why one thread per physical core?** SMT siblings share the P-core's vector execution units, L1/L2 caches, and memory controllers. Two threads on the same physical core contend for these resources. In the llama.cpp decode path, each thread runs an expert MLP GEMM — a tight, vector-heavy loop with little thread-to-thread communication. Sharing a core means the two threads serialize on the vector pipeline, effectively halving throughput for those two threads while wasting the SMT slot.
+
+**Why exclude E-cores entirely?** E-cores have narrower vector units (AVX-256 vs AVX-512 on P-cores), smaller caches, and different pipeline depth. When a mixed P+E workload runs, the P-cores stall waiting for E-core finish barriers, and the E-cores are throughput-limited. The result is lower per-thread performance and higher total latency across the GEMM.
+
+### How this improves performance
+
+Pinning to a single thread per P-core improves tokens/second not by increasing hardware bandwidth, but by improving execution efficiency:
+
+1. **Cache locality** — each thread stays on the same L1/L2 cache domain. No cache-line flush from migration. The GEMM working set for each expert MLP is typically under 512 KB and fits comfortably in L2.
+
+2. **Reduced thread migration** — the scheduler can't move workers onto E-cores or HT siblings under load. Thread-to-core affinity is established at `execve` and never broken.
+
+3. **Stable memory access patterns** — with fixed threads on P-cores, DDR5 dual-channel bandwidth is consumed predictably. No NUMA node hops or cache coherence traffic from cross-socket migration. This stabilizes memory bandwidth utilization, which is the throughput limiter on CPU-side expert MLPs.
+
+4. **Deterministic frequency behavior** — pinned threads are less likely to trigger frequency scaling hysteresis. The cores stay at their boost frequency because the scheduler sees consistent load on the same physical cores, rather than oscillating as threads migrate.
+
+The improvement comes from cleaner execution, not more hardware. The same DDR5 bandwidth, same P-core count, same GEMM math — just better utilization because threads don't fight each other for shared resources.
+
+### Verifying pinning
+
+Confirm the process is on the right cores:
+
+```bash
+# Find llama-server PID
+pgrep -f llama-server
+
+# Show which CPUs the process is pinned to
+taskset -p <PID>
+```
+
+Expected output for the even-set example:
+```
+pid <PID>'s current affinity list: 0,2,4,6,8,10,12,14
+```
+
+### Per-model canonical commands with `taskset`
+
+Add `taskset -c 0,2,4,6,8,10,12,14` to any of the run commands above:
+
+```bash
+# With run-server.sh
+taskset -c 0,2,4,6,8,10,12,14 ./scripts/run-server.sh -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf --alias qwen3.6
+
+# Direct llama-server
+taskset -c 0,2,4,6,8,10,12,14 ./llama.cpp/build/bin/llama-server \
+  -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
+  --alias qwen3.6-35b \
+  --n-gpu-layers 999 \
+  --n-cpu-moe 32 \
+  -ctk turbo4 \
+  -ctv turbo3_tcq \
+  -c 128000 \
+  -fa on \
+  --fit off \
+  -np 1 \
+  --threads 8 \
+  --host 0.0.0.0 --port 8080 \
+  --no-mmap
+```
+
+For CPUs with a different core layout, run `lscpu -e` and extract the even-numbered thread from each P-core pair (or whichever half gives you the lower-numbered thread per core). The pattern is always: **one thread per physical P-core, no SMT siblings, no E-cores**.
+
 ## K/V cache types (`--cache-type-k / --cache-type-v`)
 
 The script's default KV pair is **`turbo4` for keys** and **`turbo3_tcq` for values** (`--cache-type-k turbo4 --cache-type-v turbo3_tcq`). Keys are lossless (4.25 bpv) while values use 3.25 bpv TCQ — this asymmetric pairing gives lossless KV for the attention numerator while keeping values ~5× compressed.
