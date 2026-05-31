@@ -27,6 +27,7 @@ THREADS=""
 FA="on"
 FIT="off"
 NP=1
+LOG_DISABLE=""
 SPEC_TYPE=""
 SPEC_DRAFT_N_MAX=""
 NO_SPEC_TYPE=""
@@ -78,6 +79,8 @@ Options:
   --no-spec-type          Disable speculative decoding even if model has MTP
                           weights. Useful when MTP causes instability.
   --flash-attn on|off     Flash attention (default: on).
+  --parallel N            llama-server parallel request handling (default: 1).
+  --log-disable           Suppress all server logging to stderr.
 
 Examples:
   # Auto-size from GGUF, run on this machine's hardware defaults
@@ -128,6 +131,8 @@ while [[ $# -gt 0 ]]; do
     --llama-cpp-dir)    LLAMA_CPP_DIR="$2"; shift 2 ;;
     --fit)              FIT="$2";          shift 2 ;;
     --flash-attn)       FA="$2";          shift 2 ;;
+    --parallel)         NP="$2";          shift 2 ;;
+    --log-disable)      LOG_DISABLE=1;    shift ;;
     --spec-type)        SPEC_TYPE="$2";    shift 2 ;;
     --spec-draft-n-max) SPEC_DRAFT_N_MAX="$2"; shift 2 ;;
     --no-spec-type)     NO_SPEC_TYPE=1;    shift ;;
@@ -290,6 +295,7 @@ except:
 fi
 
 # Optional flags
+[[ -n "$LOG_DISABLE" ]] && CMD+=(--log-disable)
 [[ -n "$ALIAS" ]]     && CMD+=(--alias "$ALIAS")
 [[ -n "$THREADS" ]]   && CMD+=(--threads "$THREADS")
 [[ -n "$NO_MMAP" ]]    && CMD+=(--no-mmap)
